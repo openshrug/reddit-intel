@@ -1,0 +1,135 @@
+{% extends "base.html" %}
+{% block title %}Listening to r/{{ subreddit }}…{% endblock %}
+
+{% block content %}
+<div class="max-w-2xl mx-auto px-6 pt-20 pb-32">
+    <div class="text-center mb-10">
+        <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-reddit-orange/10 border border-reddit-orange/30 text-xs text-reddit-orange font-mono mb-6">
+            <span class="w-1.5 h-1.5 bg-reddit-orange rounded-full animate-pulse"></span>
+            LISTENING
+        </div>
+        <h1 class="text-4xl font-bold tracking-tight mb-3 text-reddit-text">
+            <span class="font-mono text-reddit-subtext">r/</span><span class="gradient-text">{{ subreddit }}</span>
+        </h1>
+        <p class="text-sm text-reddit-subtext">Reading posts, extracting painpoints, and cross-referencing your customers' frustrations. ~60–90 seconds.</p>
+    </div>
+
+    <div class="card rounded-xl p-5">
+        <div id="events" class="space-y-1.5 font-mono text-xs text-reddit-text max-h-[60vh] overflow-auto leading-relaxed">
+            <div class="text-reddit-subtext">› waiting for events…</div>
+        </div>
+    </div>
+
+    <div id="redirect-note" class="text-center mt-8 text-sm text-reddit-upvote hidden">
+        ✓ Done. Opening insights…
+    </div>
+
+    <div id="error-note" class="text-center mt-8 text-sm text-reddit-orange hidden font-mono"></div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function() {
+    const eventsEl = document.getElementById('events');
+    const redirectEl = document.getElementById('redirect-note');
+    const errorEl = document.getElementById('error-note');
+    let hasEvents = false;
+
+    const STAGE_ICONS = {
+        start:     '→',
+        scrape:    '📡',
+        comments:  '💬',
+        filter:    '🔍',
+        extract:   '🧠',
+        cross_ref: '🔗',
+        cache:     '📦',
+        done:      '✓',
+        error:     '✗',
+    };
+
+    const SPINNER = ['◐','◓','◑','◒'];
+    let spinIdx = 0;
+
+    const STAGE_COLORS = {
+        running: 'text-reddit-text',
+        done:    'text-reddit-upvote',
+        error:   'text-reddit-orange',
+        tick:    'text-reddit-subtext',
+    };
+
+    // The most recent "tick" line — we replace it in-place on each heartbeat.
+    // Any non-tick event "freezes" the current tick line and starts fresh.
+    let currentTickLine = null;
+
+    function buildLine(ev, isSpinner) {
+        const icon = isSpinner ? SPINNER[spinIdx++ % SPINNER.length] : (STAGE_ICONS[ev.stage] || '·');
+        const color = STAGE_COLORS[ev.status] || 'text-reddit-text';
+        const line = document.createElement('div');
+        line.className = 'flex items-start gap-2 ' + color;
+        const iconClass = isSpinner ? 'w-4 shrink-0 text-reddit-orange animate-pulse' : 'w-4 shrink-0 text-reddit-subtext';
+        line.innerHTML = `<span class="${iconClass}">${icon}</span><span class="break-words min-w-0 flex-1">${escapeHtml(ev.detail || ev.stage)}</span>`;
+        return line;
+    }
+
+    function appendEvent(ev) {
+        if (!hasEvents) {
+            eventsEl.innerHTML = '';
+            hasEvents = true;
+        }
+
+        if (ev.status === 'tick') {
+            // Replace the existing tick line (in-place update), or create one
+            const line = buildLine(ev, true);
+            if (currentTickLine && currentTickLine.parentNode === eventsEl) {
+                eventsEl.replaceChild(line, currentTickLine);
+            } else {
+                eventsEl.appendChild(line);
+            }
+            currentTickLine = line;
+        } else {
+            // Non-tick event — freeze the spinner and start a new log line
+            currentTickLine = null;
+            const line = buildLine(ev, false);
+            eventsEl.appendChild(line);
+        }
+        eventsEl.scrollTop = eventsEl.scrollHeight;
+    }
+
+    function escapeHtml(s) {
+        return (s || '').replace(/[&<>"']/g, m => ({
+            '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+        }[m]));
+    }
+
+    const es = new EventSource("/jobs/{{ job_id }}/stream");
+
+    es.addEventListener('progress', e => {
+        try { appendEvent(JSON.parse(e.data)); } catch (_) {}
+    });
+
+    es.addEventListener('done', e => {
+        es.close();
+        try {
+            const payload = JSON.parse(e.data);
+            if (payload.ok && payload.redirect) {
+                redirectEl.classList.remove('hidden');
+                setTimeout(() => { window.location.href = payload.redirect; }, 600);
+            } else {
+                errorEl.textContent = payload.error || 'Analysis failed';
+                errorEl.classList.remove('hidden');
+            }
+        } catch (_) {
+            errorEl.textContent = 'Stream ended unexpectedly';
+            errorEl.classList.remove('hidden');
+        }
+    });
+
+    es.onerror = () => {
+        es.close();
+        errorEl.textContent = 'Lost connection to server';
+        errorEl.classList.remove('hidden');
+    };
+})();
+</script>
+{% endblock %}

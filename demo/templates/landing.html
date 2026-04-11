@@ -1,0 +1,120 @@
+{% extends "base.html" %}
+{% block title %}AI Pulse — Understand your startup's users from their own subreddit{% endblock %}
+
+{% block content %}
+<div class="max-w-4xl mx-auto px-6 pt-20 pb-16 text-center">
+    <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-reddit-orange/10 border border-reddit-orange/30 text-xs text-reddit-orange font-mono mb-8">
+        <span class="w-1.5 h-1.5 bg-reddit-orange rounded-full animate-pulse"></span>
+        USER RESEARCH · for founders
+    </div>
+
+    <h1 class="text-5xl sm:text-6xl font-bold tracking-tight mb-6 leading-[1.05] text-reddit-text">
+        Understand the pain <br>
+        <span class="gradient-text">of your startup's users.</span>
+    </h1>
+
+    <p class="text-lg text-reddit-subtext max-w-2xl mx-auto mb-10 leading-relaxed">
+        Your future customers are already on Reddit complaining about the problem you want to solve. Point AI Pulse at their subreddit — in 90 seconds you'll see the exact painpoints, the tools they hate, the workarounds they've hacked together, and the gaps nobody is filling.
+    </p>
+
+    <form method="post" action="/analyze" class="max-w-md mx-auto mb-4">
+        <div class="flex items-center gap-2 p-1.5 rounded-full bg-reddit-panel border border-reddit-border focus-within:border-reddit-orange focus-within:glow transition-all">
+            <span class="pl-4 text-reddit-subtext font-mono text-sm">r/</span>
+            <input
+                type="text"
+                name="subreddit"
+                placeholder="where your users hang out"
+                required
+                autocomplete="off"
+                class="flex-1 bg-transparent border-none outline-none py-2.5 text-base text-reddit-text placeholder:text-reddit-subtext/60"
+            />
+            <button
+                type="submit"
+                class="px-5 py-2.5 rounded-full bg-reddit-orange hover:bg-[#ff5722] text-white font-semibold text-sm transition-colors"
+            >
+                Listen in →
+            </button>
+        </div>
+        <p class="text-xs text-reddit-subtext mt-3 font-mono">~60–90s · free · no signup · real quotes, real users</p>
+    </form>
+
+    <!-- Example seeds -->
+    <div class="flex flex-wrap items-center justify-center gap-2 text-xs mt-6">
+        <span class="text-reddit-subtext/70 font-mono mr-1">try:</span>
+        {% for example in ['LocalLLaMA', 'selfhosted', 'startups', 'smallbusiness', 'webdev'] %}
+        <form method="post" action="/analyze" class="inline">
+            <input type="hidden" name="subreddit" value="{{ example }}">
+            <button type="submit" class="px-3 py-1 rounded-full border border-reddit-border hover:border-reddit-orange hover:text-reddit-orange text-reddit-subtext font-mono transition-colors">
+                r/{{ example }}
+            </button>
+        </form>
+        {% endfor %}
+    </div>
+</div>
+
+{% if cached %}
+<div class="max-w-6xl mx-auto px-6 pb-24">
+    <div class="flex items-end justify-between mb-6">
+        <div>
+            <h2 class="text-xl font-semibold text-reddit-text">Recently analyzed</h2>
+            <p class="text-sm text-reddit-subtext mt-1">{{ total_cached }} communities · updated continuously</p>
+        </div>
+        <div class="text-xs text-reddit-subtext font-mono hidden sm:block">click to dive in →</div>
+    </div>
+
+    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+        {% for c in cached %}
+        <a href="/r/{{ c.subreddit }}" class="card card-hover rounded-xl p-5 transition-all group">
+            <div class="flex items-start justify-between mb-3">
+                <div class="font-mono text-sm text-reddit-text group-hover:text-reddit-orange transition-colors">
+                    r/{{ c.subreddit }}
+                </div>
+                <div class="text-xs text-reddit-subtext font-mono">{{ c.posts }} posts</div>
+            </div>
+            {% if c.community_vibe %}
+            <p class="text-sm text-reddit-subtext leading-relaxed line-clamp-3 mb-4">{{ c.community_vibe }}</p>
+            {% endif %}
+            <div class="flex items-center gap-4 text-xs text-reddit-subtext font-mono">
+                <span class="flex items-center gap-1">
+                    <span class="text-reddit-orange">●</span> {{ c.painpoints }} pains
+                </span>
+                <span class="flex items-center gap-1">
+                    <span class="text-reddit-upvote">●</span> {{ c.products }} products
+                </span>
+            </div>
+        </a>
+        {% endfor %}
+    </div>
+</div>
+{% else %}
+<div class="max-w-4xl mx-auto px-6 pb-24 text-center">
+    <div class="card rounded-xl p-10">
+        <div class="text-5xl mb-4">🌱</div>
+        <h3 class="text-lg font-semibold text-reddit-text mb-2">No analyses yet</h3>
+        <p class="text-sm text-reddit-subtext">Be the first. Type a subreddit above and watch AI Pulse read it in real time.</p>
+    </div>
+</div>
+{% endif %}
+
+<!-- Value props reframed around the founder -->
+<div class="max-w-6xl mx-auto px-6 pb-20">
+    <h2 class="text-sm font-mono text-reddit-subtext mb-4">▸ WHAT YOU GET</h2>
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">
+        <div class="card rounded-xl p-5">
+            <div class="text-reddit-orange mb-2 font-mono text-xs">01 · REAL PAINPOINTS</div>
+            <div class="text-reddit-text font-semibold mb-1">Not generic complaints</div>
+            <div class="text-reddit-subtext text-xs leading-relaxed">Specific, severity-ranked frustrations pulled from actual posts — with verbatim user quotes you can put straight into a landing page.</div>
+        </div>
+        <div class="card rounded-xl p-5">
+            <div class="text-reddit-orange mb-2 font-mono text-xs">02 · THE COMPETITIVE LANDSCAPE</div>
+            <div class="text-reddit-text font-semibold mb-1">What they already use (and hate)</div>
+            <div class="text-reddit-subtext text-xs leading-relaxed">Which tools the community is adopting, which ones people are complaining about, and exactly where each one falls short.</div>
+        </div>
+        <div class="card rounded-xl p-5">
+            <div class="text-reddit-orange mb-2 font-mono text-xs">03 · GAPS TO BUILD INTO</div>
+            <div class="text-reddit-text font-semibold mb-1">Where no one is shipping</div>
+            <div class="text-reddit-subtext text-xs leading-relaxed">Cross-referenced against funded startups elsewhere in our intel DB — so you see which pains are real, unsolved, and worth chasing.</div>
+        </div>
+    </div>
+</div>
+{% endblock %}

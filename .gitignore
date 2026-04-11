@@ -1,0 +1,12 @@
+.env
+__pycache__/
+*.pyc
+venv/
+.venv/
+trends.db
+report.md
+trends.db-shm
+trends.db-wal
+out.txt
+idea.txt
+demo_cache/

@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}r/{{ subreddit }} not analyzed yet{% endblock %}
+
+{% block content %}
+<div class="max-w-2xl mx-auto px-6 pt-24 pb-32 text-center">
+    <div class="text-6xl mb-6">🔍</div>
+    <h1 class="text-3xl font-bold tracking-tight mb-3 text-reddit-text">
+        <span class="font-mono text-reddit-subtext">r/</span>{{ subreddit }}
+    </h1>
+    <p class="text-reddit-subtext mb-8">We haven't listened to this community yet. Want to?</p>
+    <form method="post" action="/analyze">
+        <input type="hidden" name="subreddit" value="{{ subreddit }}">
+        <button type="submit" class="px-6 py-3 rounded-full bg-reddit-orange hover:bg-[#ff5722] text-white font-semibold transition-colors">
+            Analyze r/{{ subreddit }} →
+        </button>
+    </form>
+    <div class="mt-12">
+        <a href="/" class="text-sm text-reddit-subtext hover:text-reddit-orange transition-colors">← back to landing</a>
+    </div>
+</div>
+{% endblock %}

@@ -1,0 +1,347 @@
+{% extends "base.html" %}
+{% block title %}r/{{ data.subreddit }} — painpoints & product ideas{% endblock %}
+
+{% block content %}
+{% set stats = data.stats %}
+
+<!-- HERO -->
+<section class="max-w-5xl mx-auto px-6 pt-16 pb-10">
+    <div class="flex items-center gap-2 text-xs text-reddit-subtext font-mono mb-4">
+        <a href="/" class="hover:text-reddit-orange transition-colors">← back</a>
+        <span>·</span>
+        <span>analyzed {{ data.scraped_at[:10] }}</span>
+        {% if data.cached %}<span>·</span><span class="text-reddit-upvote">cached</span>{% endif %}
+    </div>
+
+    <h1 class="text-5xl sm:text-6xl font-bold tracking-tight leading-[1.05] mb-4 text-reddit-text">
+        <span class="font-mono text-reddit-subtext">r/</span><span class="gradient-text">{{ data.subreddit }}</span>
+    </h1>
+
+    {% if data.community_vibe %}
+    <p class="text-xl text-reddit-text leading-relaxed max-w-3xl">{{ data.community_vibe }}</p>
+    {% endif %}
+
+    <!-- compact stats bar -->
+    <div class="flex flex-wrap items-center gap-x-6 gap-y-2 mt-6 text-xs font-mono text-reddit-subtext">
+        <span><span class="text-reddit-text font-semibold">{{ stats.posts_scraped }}</span> posts</span>
+        <span><span class="text-reddit-text font-semibold">{{ stats.comments_scraped }}</span> comments</span>
+        <span><span class="text-reddit-text font-semibold">{{ stats.unique_users }}</span> users</span>
+        <span><span class="text-reddit-orange font-semibold">{{ data.painpoints|length }}</span> painpoints extracted</span>
+    </div>
+</section>
+
+<!-- SECTION 1: PAINPOINTS -->
+<section class="max-w-5xl mx-auto px-6 pt-8 pb-20">
+    <div class="mb-8">
+        <div class="inline-flex items-center gap-2 px-2.5 py-1 rounded-full bg-reddit-orange/10 border border-reddit-orange/30 text-[10px] text-reddit-orange font-mono mb-3">
+            SECTION 01
+        </div>
+        <h2 class="text-3xl font-bold text-reddit-text leading-tight mb-2">Painpoints from r/{{ data.subreddit }}</h2>
+        <p class="text-sm text-reddit-subtext max-w-2xl">Specific, severity-ranked frustrations pulled from actual posts and comments — with verbatim user quotes you can put straight into a landing page.</p>
+    </div>
+
+    {% if data.painpoints %}
+    <div class="space-y-3">
+        {% for pp in data.painpoints %}
+        <div class="card card-hover rounded-xl p-6 transition-colors">
+            <div class="flex items-start justify-between gap-4 mb-3">
+                <div class="flex items-start gap-3">
+                    <span class="font-mono text-xs text-reddit-subtext pt-1 tabular-nums">{{ "%02d"|format(loop.index) }}</span>
+                    <h3 class="text-lg font-semibold text-reddit-text leading-snug">{{ pp.title }}</h3>
+                </div>
+                <div class="flex items-center gap-2 shrink-0">
+                    <div class="w-20 h-1.5 bg-reddit-border rounded-full overflow-hidden">
+                        <div class="severity-bar h-full" style="width: {{ (pp.severity or 5) * 10 }}%"></div>
+                    </div>
+                    <span class="text-xs font-mono text-reddit-subtext tabular-nums">{{ pp.severity or '?' }}/10</span>
+                </div>
+            </div>
+            {% if pp.description %}
+            <p class="text-sm text-reddit-subtext leading-relaxed mb-4 pl-8">{{ pp.description }}</p>
+            {% endif %}
+            {% if pp.quotes %}
+            <div class="space-y-2 border-l-2 border-reddit-orange/50 pl-4 ml-8 mt-4">
+                {% for q in pp.quotes[:3] %}
+                <blockquote class="text-sm text-reddit-text italic leading-relaxed">"{{ q }}"</blockquote>
+                {% endfor %}
+            </div>
+            {% endif %}
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="card rounded-xl p-8 text-center text-sm text-reddit-subtext">
+        No clean painpoints extracted from this community.
+    </div>
+    {% endif %}
+</section>
+
+<!-- Divider -->
+<div class="max-w-5xl mx-auto px-6">
+    <div class="h-px bg-gradient-to-r from-transparent via-reddit-border to-transparent"></div>
+</div>
+
+<!-- SECTION 2: PRODUCT IDEAS (generated in background while user reads) -->
+<section id="ideas-section" class="max-w-5xl mx-auto px-6 pt-16 pb-24">
+    <div class="mb-8 flex items-start justify-between gap-4">
+        <div>
+            <div class="inline-flex items-center gap-2 px-2.5 py-1 rounded-full bg-reddit-orange/10 border border-reddit-orange/30 text-[10px] text-reddit-orange font-mono mb-3">
+                SECTION 02
+            </div>
+            <h2 class="text-3xl font-bold text-reddit-text leading-tight mb-2">Product ideas addressing these painpoints</h2>
+            <p class="text-sm text-reddit-subtext max-w-2xl">
+                An LLM reads the painpoints above, researches existing solutions, and proposes product ideas worth building.
+            </p>
+        </div>
+        <div id="ideas-status-badge" class="shrink-0 text-[10px] font-mono px-2 py-1 rounded-full border border-reddit-border text-reddit-subtext">
+            loading…
+        </div>
+    </div>
+
+    <!-- Generating placeholder — live log of what the model is doing -->
+    <div id="ideas-placeholder" class="card rounded-xl p-6">
+        <div class="flex items-center gap-3 mb-4 pb-4 border-b border-reddit-border">
+            <span class="w-4 h-4 border-2 border-reddit-orange border-t-transparent rounded-full animate-spin shrink-0"></span>
+            <span class="text-sm font-mono text-reddit-text" id="ideas-placeholder-text">An LLM is brainstorming buildable products…</span>
+        </div>
+        <div id="ideas-log" class="space-y-1.5 font-mono text-xs text-reddit-text max-h-96 overflow-auto leading-relaxed">
+            <div class="text-reddit-subtext">› waiting for the model…</div>
+        </div>
+    </div>
+
+    <!-- Real ideas grid (hidden until loaded) -->
+    <div id="ideas-container" class="space-y-4 hidden"></div>
+
+    <!-- Error state -->
+    <div id="ideas-error" class="card rounded-xl p-6 hidden border-l-2 border-l-reddit-orange">
+        <div class="text-xs font-mono text-reddit-orange mb-2">✗ IDEA GENERATION FAILED</div>
+        <p class="text-sm text-reddit-text" id="ideas-error-msg"></p>
+        <button id="ideas-retry" class="mt-3 text-xs font-mono text-reddit-orange hover:underline">retry</button>
+    </div>
+</section>
+
+<!-- CTA -->
+<section class="max-w-5xl mx-auto px-6 pb-24">
+    <div class="card rounded-xl p-10 text-center glow">
+        <div class="text-xs font-mono text-reddit-orange mb-3">NEXT</div>
+        <h3 class="text-2xl font-semibold text-reddit-text mb-3">Know another subreddit where your users live?</h3>
+        <p class="text-sm text-reddit-subtext mb-6 max-w-md mx-auto">Cross-reference a second community. Painpoints that show up in multiple subreddits are the ones worth building against.</p>
+        <form method="post" action="/analyze" class="max-w-sm mx-auto">
+            <div class="flex items-center gap-2 p-1.5 rounded-full bg-reddit-panel border border-reddit-border focus-within:border-reddit-orange transition-all">
+                <span class="pl-4 text-reddit-subtext font-mono text-sm">r/</span>
+                <input type="text" name="subreddit" placeholder="another community" required class="flex-1 bg-transparent border-none outline-none py-2 text-sm text-reddit-text placeholder:text-reddit-subtext/60">
+                <button type="submit" class="px-4 py-2 rounded-full bg-reddit-orange hover:bg-[#ff5722] text-white font-semibold text-sm transition-colors">Listen in →</button>
+            </div>
+        </form>
+    </div>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function() {
+    const SUB = {{ data.subreddit | tojson }};
+    const INITIAL_STATUS = {{ (data.ideas_status or 'not_started') | tojson }};
+    const INITIAL_IDEAS = {{ (data.ideas or []) | tojson }};
+
+    const placeholder = document.getElementById('ideas-placeholder');
+    const placeholderText = document.getElementById('ideas-placeholder-text');
+    const logEl = document.getElementById('ideas-log');
+    const container = document.getElementById('ideas-container');
+    const badge = document.getElementById('ideas-status-badge');
+    const errorBox = document.getElementById('ideas-error');
+    const errorMsg = document.getElementById('ideas-error-msg');
+    const retryBtn = document.getElementById('ideas-retry');
+
+    const PLACEHOLDER_CYCLE = [
+        'Generating product ideas…',
+        'Reading painpoints above…',
+        'Researching existing solutions…',
+        'Checking against funded startups…',
+        'Reviewing each candidate…',
+        'Drafting the final shortlist…',
+    ];
+
+    // Icon + color per event stage. We keep the labels neutral in the UI.
+    const STAGE_META = {
+        start:       { icon: '→',  cls: 'text-reddit-text' },
+        research:    { icon: '🔎', cls: 'text-reddit-text' },
+        propose:     { icon: '💡', cls: 'text-reddit-text' },
+        idea:        { icon: '💡', cls: 'text-reddit-text' },
+        competition: { icon: '🔍', cls: 'text-reddit-subtext' },
+        critic:      { icon: '·',  cls: 'text-reddit-subtext' },  // shown as generic activity
+        verdict:     { icon: '·',  cls: 'text-reddit-subtext' },
+        done:        { icon: '✓',  cls: 'text-reddit-upvote' },
+        error:       { icon: '✗',  cls: 'text-reddit-orange' },
+    };
+
+    function iconFor(ev) {
+        if (ev.stage === 'verdict') {
+            if (ev.status === 'done')  return { icon: '✓', cls: 'text-reddit-upvote' };
+            if (ev.status === 'error') return { icon: '✗', cls: 'text-reddit-orange' };
+            return { icon: '✏', cls: 'text-reddit-text' };
+        }
+        return STAGE_META[ev.stage] || { icon: '·', cls: 'text-reddit-text' };
+    }
+
+    let lastRenderedLogLen = 0;
+    function renderLog(log) {
+        if (!log || log.length === lastRenderedLogLen) return;
+        if (lastRenderedLogLen === 0 && log.length > 0) {
+            logEl.innerHTML = '';
+        }
+        for (let i = lastRenderedLogLen; i < log.length; i++) {
+            const ev = log[i];
+            const { icon, cls } = iconFor(ev);
+            const line = document.createElement('div');
+            line.className = 'flex items-start gap-2 ' + cls;
+            line.innerHTML = `<span class="w-4 shrink-0 text-reddit-subtext">${icon}</span><span class="break-words min-w-0 flex-1">${escapeHtml(ev.detail || ev.stage)}</span>`;
+            logEl.appendChild(line);
+        }
+        lastRenderedLogLen = log.length;
+        logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    function setBadge(text, color) {
+        badge.textContent = text;
+        badge.className = 'shrink-0 text-[10px] font-mono px-2 py-1 rounded-full border ' + color;
+    }
+
+    function escapeHtml(s) {
+        return (s || '').replace(/[&<>"']/g, m => ({
+            '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+        }[m]));
+    }
+
+    function renderIdea(idea, index) {
+        const card = document.createElement('div');
+        card.className = 'card card-hover rounded-xl p-6 transition-all';
+        card.style.opacity = '0';
+        card.style.transform = 'translateY(8px)';
+        card.style.transition = 'opacity 400ms ease, transform 400ms ease';
+
+        const fields = [
+            ['what_it_does',   'What it does'],
+            ['target_user',    'Target user'],
+            ['viral_hook',     'Viral hook'],
+            ['mvp_scope',      'MVP scope'],
+            ['tech_stack',     'Tech stack'],
+            ['market_reasoning', 'Why now'],
+        ];
+
+        let body = '';
+        for (const [key, label] of fields) {
+            const val = idea[key];
+            if (val) {
+                body += `<div class="mb-3 last:mb-0">
+                    <div class="text-[10px] font-mono text-reddit-orange uppercase mb-0.5">${label}</div>
+                    <div class="text-sm text-reddit-text leading-relaxed">${escapeHtml(val)}</div>
+                </div>`;
+            }
+        }
+
+        let criticNote = '';
+        if (idea.critic_notes || (idea.critic_issues && idea.critic_issues.length)) {
+            const issues = (idea.critic_issues || []).map(i => `<li class="text-reddit-subtext italic">${escapeHtml(i)}</li>`).join('');
+            criticNote = `<div class="mt-5 pt-4 border-t border-reddit-border text-xs">
+                <div class="text-reddit-subtext font-mono mb-1.5">🧐 CRITIC NOTES</div>
+                ${idea.critic_notes ? `<div class="text-reddit-text italic mb-1.5">${escapeHtml(idea.critic_notes)}</div>` : ''}
+                ${issues ? `<ul class="list-disc pl-4 space-y-0.5">${issues}</ul>` : ''}
+            </div>`;
+        }
+
+        card.innerHTML = `
+            <div class="flex items-start gap-3 mb-4">
+                <span class="font-mono text-xs text-reddit-subtext pt-1 tabular-nums">${String(index + 1).padStart(2, '0')}</span>
+                <h3 class="text-xl font-semibold text-reddit-text leading-tight flex-1">${escapeHtml(idea.name || 'Untitled idea')}</h3>
+            </div>
+            <div class="pl-8">${body}${criticNote}</div>
+        `;
+
+        container.appendChild(card);
+
+        requestAnimationFrame(() => {
+            card.style.opacity = '1';
+            card.style.transform = 'translateY(0)';
+        });
+    }
+
+    function renderIdeas(ideas) {
+        container.innerHTML = '';
+        if (!ideas || !ideas.length) {
+            placeholder.classList.add('hidden');
+            container.classList.remove('hidden');
+            container.innerHTML = '<div class="card rounded-xl p-8 text-center text-sm text-reddit-subtext">The critic rejected every idea. Pain is real but no clean winners right now — try another community to triangulate.</div>';
+            setBadge('no clean winner', 'border-reddit-border text-reddit-subtext');
+            return;
+        }
+        ideas.forEach((idea, i) => renderIdea(idea, i));
+        placeholder.classList.add('hidden');
+        container.classList.remove('hidden');
+        setBadge(`${ideas.length} idea${ideas.length === 1 ? '' : 's'}`, 'border-reddit-upvote/40 text-reddit-upvote');
+    }
+
+    function renderError(msg) {
+        placeholder.classList.add('hidden');
+        container.classList.add('hidden');
+        errorMsg.textContent = msg || 'Something went wrong during idea generation.';
+        errorBox.classList.remove('hidden');
+        setBadge('failed', 'border-reddit-orange/40 text-reddit-orange');
+    }
+
+    let cycleIdx = 0;
+    const cycleInterval = setInterval(() => {
+        if (placeholder.classList.contains('hidden')) return;
+        cycleIdx = (cycleIdx + 1) % PLACEHOLDER_CYCLE.length;
+        placeholderText.textContent = PLACEHOLDER_CYCLE[cycleIdx];
+    }, 4000);
+
+    async function poll() {
+        try {
+            const r = await fetch(`/api/r/${encodeURIComponent(SUB)}/ideas`, { cache: 'no-store' });
+            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            const data = await r.json();
+
+            renderLog(data.log);
+
+            if (data.status === 'done') {
+                clearInterval(cycleInterval);
+                renderIdeas(data.ideas);
+                return;
+            }
+            if (data.status === 'error') {
+                clearInterval(cycleInterval);
+                renderError(data.error);
+                return;
+            }
+            if (data.status === 'not_started') {
+                await fetch(`/api/r/${encodeURIComponent(SUB)}/ideas/start`, { method: 'POST' });
+                setBadge('starting…', 'border-reddit-border text-reddit-subtext');
+            } else {
+                setBadge('generating…', 'border-reddit-orange/40 text-reddit-orange');
+            }
+            setTimeout(poll, 2000);
+        } catch (e) {
+            setTimeout(poll, 5000);
+        }
+    }
+
+    if (INITIAL_STATUS === 'done' && INITIAL_IDEAS && INITIAL_IDEAS.length) {
+        clearInterval(cycleInterval);
+        renderIdeas(INITIAL_IDEAS);
+    } else {
+        poll();
+    }
+
+    retryBtn.addEventListener('click', async () => {
+        errorBox.classList.add('hidden');
+        placeholder.classList.remove('hidden');
+        lastRenderedLogLen = 0;
+        logEl.innerHTML = '<div class="text-reddit-subtext">› waiting for the model…</div>';
+        setBadge('generating…', 'border-reddit-orange/40 text-reddit-orange');
+        await fetch(`/api/r/${encodeURIComponent(SUB)}/ideas/start`, { method: 'POST' });
+        poll();
+    });
+})();
+</script>
+{% endblock %}

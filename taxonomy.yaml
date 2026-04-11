@@ -1,0 +1,88 @@
+# Category taxonomy — edit this to add/remove categories.
+# Structure: top-level categories with children.
+# The LLM can propose new categories via pending_categories table.
+
+AI/ML:
+  desc: Artificial intelligence, machine learning, LLMs
+  children:
+    AI Coding Tools: IDEs, code completion, autonomous coding agents
+    LLM Infrastructure: Inference, serving, fine-tuning, training
+    Multi-Agent Systems: Agent orchestration, workflows, agent frameworks
+    AI Search & RAG: Retrieval-augmented generation, semantic search, vector DBs
+    Generative Media: Image/video/audio generation, AI design tools
+    AI Safety & Moderation: Content moderation, guardrails, evaluation
+    AI in Biotech: Drug discovery, protein folding, bio-AI
+
+Developer Tools:
+  desc: Software development infrastructure and productivity
+  children:
+    IDEs & Editors: Code editors, language servers, extensions
+    CI/CD & DevOps: Build pipelines, deployment automation
+    Observability: Logs, metrics, traces, monitoring
+    API Tools: API development, testing, documentation
+    Version Control: Git hosting, code review, collaboration
+
+Cloud & Infrastructure:
+  desc: Compute, storage, networking, platforms
+  children:
+    Compute & Hosting: Servers, containers, serverless
+    Data Centers: Physical infra, power, location
+    Edge & CDN: Edge computing, content delivery
+    Databases: SQL, NoSQL, time-series, vector
+    Cloud Platforms: AWS, GCP, Azure, alternatives
+
+Security & Privacy:
+  desc: Cybersecurity, auth, privacy tools
+  children:
+    Auth & Identity: KYC, SSO, passwordless, verification
+    Application Security: SAST, DAST, vuln scanning
+    Supply Chain Security: Dependency audit, SBOMs
+    Privacy Tools: E2E encryption, VPN, data protection
+
+Data & Analytics:
+  desc: Data pipelines, warehouses, analytics
+  children:
+    Data Pipelines: ETL, streaming, orchestration
+    Data Warehouses: Lakehouse, OLAP
+    BI & Analytics: Dashboards, reporting
+    Data Quality: Observability, lineage, testing
+
+Hardware & Robotics:
+  desc: Physical computing, chips, robots
+  children:
+    AI Chips: GPUs, TPUs, inference accelerators
+    Robotics: Autonomous systems, drones
+    IoT & Edge Devices: Sensors, embedded
+    Consumer Electronics: Phones, wearables, home
+
+Fintech:
+  desc: Financial services, payments, crypto
+  children:
+    Payments: Payment processing, Stripe-likes
+    Banking & Treasury: Neobanks, cash management
+    Crypto & Web3: Blockchain, DeFi, NFTs
+    InsurTech: Insurance products
+
+Creator & Content:
+  desc: Tools for creators, content production, media
+  children:
+    Video Tools: Editing, demos, screen recording
+    Writing & Publishing: Blogs, newsletters, docs
+    Social Media Tools: Scheduling, analytics, management
+    Design Tools: Figma-likes, prototyping, assets
+
+Productivity & Workflow:
+  desc: Tools for individuals and teams to get work done
+  children:
+    Project Management: Task tracking, planning
+    Notes & Knowledge: Note apps, wikis, knowledge bases
+    Communication: Chat, video, async
+    Automation: No-code, workflow automation
+
+Business & Sales:
+  desc: CRM, sales, marketing, ops
+  children:
+    CRM & Sales: Pipeline, lead gen
+    Marketing Automation: Email, campaigns, attribution
+    Customer Support: Helpdesks, ticketing
+    HR & Recruiting: Hiring, onboarding, people ops
