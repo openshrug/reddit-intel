@@ -1,0 +1,28 @@
+---
+description: Reddit API usage, platform structure, and signal-analysis pitfalls for reddit-intel
+alwaysApply: true
+---
+
+# Reddit API & structure (reddit-intel)
+
+## Platform model
+
+- **Subreddit** = separate community; culture and moderation differ. Do not treat all subs as one population.
+- **Posts** = link (external URL) or **self** (body in `selftext`). For signals, use **title + selftext + metadata**, not title alone.
+- **Comments** = **nested tree**; one request returns a slice. Deeper threads = more calls or different strategy.
+- **`score`** = upvotes minus downvotes (fuzzed). It is a **weak popularity proxy**, not truth for “importance” or quality.
+
+## API usage (this project)
+- Expect **429** (back off / retry), **403** (private / banned / quarantine), **404** (bad sub name) when using OAuth Reddit API. Handle explicitly.
+- **Pagination**: listings continue with **`after`** (opaque token). The first page is only a **sample** of “what’s visible now” for that sort.
+
+## What you are actually fetching
+
+- **`sort`** (`hot`, `new`, `top`, `rising`, `controversial`) and **`t`** (for `top` / `controversial`: hour/day/week/month/year) define **which posts exist in the result set**. Changing them changes the **population** you analyze.
+- **Listings** = breadth / “what’s active” in a sub. **Search** = intent / language (pain, launches, alternatives); syntax (`"quotes"`, `OR`) and **search sort + time filter** strongly affect results.
+- **Stickied** posts often skew `/hot`; **filter them** when mining organic discussion unless you explicitly want announcements.
+
+## Signal hygiene
+
+- **Dedupe** by stable id: prefer **`permalink`** or post **`id`** across subs, searches, and merged listing passes.
+- **Cross-posts / same URL** can inflate volume; normalize when comparing “how often” something appears.
