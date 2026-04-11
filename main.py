@@ -68,7 +68,7 @@ def cmd_stats(_args):
 
 
 def main():
-    load_dotenv()
+    load_dotenv(override=True)
 
     parser = argparse.ArgumentParser(description="Reddit Pulse — trend intelligence")
     subparsers = parser.add_subparsers(dest="command", required=True)
