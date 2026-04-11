@@ -4,10 +4,11 @@ __pycache__/
 venv/
 .venv/
 trends.db
+trends.db.lsh.pkl
 report.md
 trends.db-shm
 trends.db-wal
 out.txt
 idea.txt
 demo_cache/
-docs/
+LEGITIMACY_SCORING_PLAN.md

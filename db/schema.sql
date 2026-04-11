@@ -92,3 +92,58 @@ CREATE TABLE IF NOT EXISTS painpoint_sources (
     pending_painpoint_id  INTEGER NOT NULL REFERENCES pending_painpoints(id) ON DELETE CASCADE,
     PRIMARY KEY (painpoint_id, pending_painpoint_id)
 );
+
+-- ============================================================================
+-- Painpoint ingest pipeline — idempotent CREATEs only
+-- (see docs/PAINPOINT_INGEST_PLAN.md). ALTER TABLE additions for
+-- existing tables live in db/__init__.py:_apply_migrations() because
+-- SQLite has no ALTER TABLE ... ADD COLUMN IF NOT EXISTS.
+-- ============================================================================
+
+-- §7.5: multi-source pending painpoints. The existing
+-- pending_painpoints.(post_id, comment_id) hold the *primary* source;
+-- additional sources for batched LLM extraction go in this junction.
+CREATE TABLE IF NOT EXISTS pending_painpoint_sources (
+    pending_painpoint_id INTEGER NOT NULL REFERENCES pending_painpoints(id) ON DELETE CASCADE,
+    post_id              INTEGER NOT NULL REFERENCES posts(id),
+    comment_id           INTEGER REFERENCES comments(id)
+);
+-- SQLite PRIMARY KEYs can't contain expressions; uniqueness with nullable
+-- comment_id needs an expression index instead.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_pps_unique
+    ON pending_painpoint_sources(pending_painpoint_id, post_id, COALESCE(comment_id, -1));
+CREATE INDEX IF NOT EXISTS idx_pps_post ON pending_painpoint_sources(post_id);
+
+-- View that unions primary + extra sources so callers don't have to
+-- remember the two-place storage.
+CREATE VIEW IF NOT EXISTS pending_painpoint_all_sources AS
+    SELECT id AS pending_painpoint_id, post_id, comment_id
+        FROM pending_painpoints
+    UNION
+    SELECT pending_painpoint_id, post_id, comment_id
+        FROM pending_painpoint_sources;
+
+-- §7.2: per-event audit trail for the category worker (see §5.3).
+-- triggering_pp and target_category are plain integer references, NOT
+-- FKs — the event itself can delete the row it points at (e.g.,
+-- delete_category deletes its target), and we still want the audit
+-- row to be valid after the fact.
+CREATE TABLE IF NOT EXISTS category_events (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_type       TEXT NOT NULL,
+    proposed_at      TEXT NOT NULL,
+    triggering_pp    INTEGER,
+    target_category  INTEGER,
+    payload_json     JSON NOT NULL,
+    metric_name      TEXT NOT NULL,
+    metric_value     REAL NOT NULL,
+    threshold        REAL NOT NULL,
+    accepted         INTEGER NOT NULL,
+    reason           TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_cat_events_proposed ON category_events(proposed_at);
+CREATE INDEX IF NOT EXISTS idx_cat_events_type ON category_events(event_type);
+
+-- §7.7 idx_posts_signal_score is created in db/__init__.py:_apply_migrations()
+-- after the signal_score column has been added (we can't reference a column
+-- that doesn't exist yet from schema.sql).
