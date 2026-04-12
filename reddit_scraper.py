@@ -26,7 +26,7 @@ CONFIG_FILE = Path(__file__).parent / "config.json"
 POSTS_PER_WINDOW = 100 # Reddit returns up to 100 posts per request
 POSTS_WITH_COMMENTS = 60
 # one post comments retrieval tunables
-COMMENTS_PER_POST = 25
+COMMENTS_PER_POST = 25 # We take top 25 comments per post after flattening the tree of replies
 COMMENT_DEPTH = 2 # 1 = top-level only, 2 = top-level + direct replies, etc.
 # request concurrency tunables
 CONCURRENT_REQUESTS = 10

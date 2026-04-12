@@ -178,6 +178,99 @@ and `comment.id` are used as foreign keys throughout the pipeline.
 - `search_reddit(client, sem, rate, query, ...)` — search endpoint
 - `_dedup_and_rank(batches)` — merge + sort by engagement
 
+## Batching strategy for LLM extraction
+
+The scraped data must be chunked to fit within the LLM context window.
+Target model: **GPT-5.4-nano** (400K context, 128K max output,
+$0.20/M input tokens, $1.25/M output tokens).
+
+### Payload size estimates
+
+Using ~4 chars/token for English text with Reddit formatting.
+
+| Component         | Count (defaults)        | Avg chars/item | Worst chars/item |
+|-------------------|-------------------------|----------------|------------------|
+| Posts              | ~200 (after dedup)      | 1,300          | 10,300           |
+| Comments           | ≤1,500 (60 posts × 25) | 550            | 5,150            |
+
+| Scenario     | Total chars | Total tokens | Fits in one 350K-usable call? |
+|-------------|-------------|--------------|-------------------------------|
+| **Average**  | ~1.09M      | ~271K        | Yes                           |
+| **Worst**    | ~9.79M      | ~2.45M       | No (7 batches)                |
+
+### Long-context recall degradation
+
+GPT-5.4-nano's 400K context window does not guarantee uniform attention
+across the full input. Benchmarks show meaningful recall loss at high
+token counts:
+
+- **MRCR v2 (multi-needle retrieval) at 64K-128K: 44.2%** — the model
+  misses scattered details in large contexts.
+- **LCR (long-context reasoning): 66%** — decent but not strong.
+- A 2026 study on the GPT-5 family found accuracy dropped to 50-53% on
+  exhaustive comprehension tasks at 70K+ tokens, while precision stayed
+  high (~95%). The model becomes more selective: what it finds is
+  accurate, but it skips more items ("lost in the middle" effect).
+
+Pain-point extraction is an **exhaustive sweep** — we need every post
+and comment examined, not just the ones the model happens to attend to.
+At ~271K tokens (our average payload), the model uses 68% of its
+context window, and estimated recall drops to ~70-80%. Splitting into
+three ~78K-token batches keeps each call well within the reliable zone
+(≤100K tokens) and brings estimated recall to ~90-95%, at negligible
+extra cost (~$0.01).
+
+| Strategy          | Tokens/batch | Est. recall | Batches | Cost   |
+|-------------------|-------------|-------------|---------|--------|
+| Single call       | ~271K       | ~70-80%     | 1       | ~$0.07 |
+| Time-window split | ~78K each   | ~90-95%     | 3       | ~$0.08 |
+
+**Recommendation:** default to the time-window split for extraction
+quality; only use a single call when speed matters more than coverage
+(e.g. interactive preview).
+
+### Batching approach
+
+1. **Time-window split (default)** — split posts by `created_utc` into
+   the original time windows (week / month / year). Each window has at
+   most ~100 posts + comments, yielding ~78K tokens on average —
+   comfortably within nano's reliable recall zone. Posts that appear in
+   multiple windows are assigned to the earliest.
+
+2. **Single call (fast path)** — if total tokens ≤ 100K, send everything
+   in one request. Useful for small subreddits or interactive previews
+   where speed matters more than exhaustive coverage.
+
+3. **Engagement-rank split (extreme fallback)** — if a single window
+   still exceeds ~100K tokens (e.g. a subreddit with very long posts),
+   split within the window by engagement rank (top half / bottom half).
+
+This gives at most 3 batches in the normal case and 6 in the extreme
+case, with each batch carrying temporally coherent posts — which helps
+the LLM detect patterns like "multiple people hit X this week".
+
+Cross-batch pattern detection is handled downstream by the **promoter**,
+which merges `pending_painpoints` by source overlap and text similarity
+regardless of which batch produced them.
+
+### Cost per subreddit (GPT-5.4-nano)
+
+| Scenario | Batches | Input cost | Output cost* | Total   |
+|----------|---------|------------|--------------|---------|
+| Average  | 3       | $0.055     | $0.038       | ~$0.09  |
+| Worst    | 7       | $0.490     | $0.088       | ~$0.58  |
+
+\* Output estimate: ~50 painpoints × ~200 tokens each per batch.
+
+### In-memory footprint
+
+| Scenario | Posts + comments in RAM |
+|----------|------------------------|
+| Average  | ~2.2 MB                |
+| Worst    | ~10.9 MB               |
+
+Memory is not a constraint for any practical deployment.
+
 ## Step 2 — LLM extraction in detail
 
 Posts and comments are formatted into batches and sent to an LLM with a
