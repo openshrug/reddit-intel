@@ -12,6 +12,7 @@ import logging
 import db
 from db.category_events import (
     apply_with_test,
+    prefetch_llm_batch,
     propose_delete_events,
     propose_merge_events,
     propose_split_events,
@@ -54,25 +55,35 @@ def run_sweep(namer=None, embedder=None):
     try:
         with merge_lock(conn, timeout=WORKER_LOCK_TIMEOUT_SEC):
             # Step 1 -- process Uncategorized
-            for event in list(propose_uncategorized_events(conn, embedder=embedder)):
+            # Batch: propose all events, fan out LLM naming calls in
+            # parallel via ThreadPoolExecutor, then apply sequentially.
+            # Turns N×(2-3s serial LLM calls) into ~(N/5)×wall-clock.
+            uncat_events = list(propose_uncategorized_events(conn, embedder=embedder))
+            prefetch_llm_batch(conn, uncat_events, namer)
+            for event in uncat_events:
                 summary["uncategorized"]["proposed"] += 1
                 if apply_with_test(conn, event, namer):
                     summary["uncategorized"]["accepted"] += 1
 
-            # Step 2 -- split crowded categories
-            for event in list(propose_split_events(conn, embedder=embedder)):
+            # Step 2 -- split crowded categories (LLM-decided in propose,
+            # no LLM call in apply — nothing to prefetch here).
+            for event in list(propose_split_events(conn, embedder=embedder, namer=namer)):
                 summary["split"]["proposed"] += 1
                 if apply_with_test(conn, event, namer):
                     summary["split"]["accepted"] += 1
 
-            # Step 3 -- delete dead categories
+            # Step 3 -- delete dead categories (no LLM call in apply)
             for event in list(propose_delete_events(conn)):
                 summary["delete"]["proposed"] += 1
                 if apply_with_test(conn, event, namer):
                     summary["delete"]["accepted"] += 1
 
             # Step 4 -- merge duplicate sibling categories
-            for event in list(propose_merge_events(conn, embedder=embedder)):
+            # (each merge makes one describe_merged_category LLM call —
+            # parallelize across the batch.)
+            merge_events = list(propose_merge_events(conn, embedder=embedder))
+            prefetch_llm_batch(conn, merge_events, namer)
+            for event in merge_events:
                 summary["merge"]["proposed"] += 1
                 if apply_with_test(conn, event, namer):
                     summary["merge"]["accepted"] += 1

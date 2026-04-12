@@ -19,8 +19,8 @@ from llm import get_client, llm_call, TokenCounter
 log = logging.getLogger(__name__)
 
 # --- Tunables ---
-MODEL = "gpt-5-nano"
-REASONING_EFFORT = "low"
+MODEL = "gpt-4.1-mini"
+REASONING_EFFORT = None   # gpt-4.1-mini is non-reasoning, much faster
 BATCH_TOKEN_BUDGET = 2_000
 LLM_CONCURRENCY = 40
 

@@ -118,10 +118,16 @@ def inter_category_similarity(conn, cat_a_id, cat_b_id, embedder=None):
         (cat_b_id,),
     ).fetchone()
 
+    expected_bytes = EMBEDDING_DIM * 4
     if vec_a is not None and vec_b is not None:
-        emb_a = list(struct.unpack(f"{EMBEDDING_DIM}f", vec_a[0]))
-        emb_b = list(struct.unpack(f"{EMBEDDING_DIM}f", vec_b[0]))
-        return _cosine_sim(emb_a, emb_b)
+        if len(vec_a[0]) == expected_bytes and len(vec_b[0]) == expected_bytes:
+            try:
+                emb_a = list(struct.unpack(f"{EMBEDDING_DIM}f", vec_a[0]))
+                emb_b = list(struct.unpack(f"{EMBEDDING_DIM}f", vec_b[0]))
+                return _cosine_sim(emb_a, emb_b)
+            except struct.error:
+                pass  # fall through to member-pair fallback
+        # Dimension mismatch — fall through to pairwise member similarity
 
     # Fallback: max pairwise member similarity
     if embedder is None:

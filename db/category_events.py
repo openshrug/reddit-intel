@@ -11,9 +11,8 @@ against test rejection, because every test is pre-mutation).
 
 import json
 import logging
-import sqlite3
-from dataclasses import dataclass, field
-from typing import Any, List, Optional
+from dataclasses import dataclass
+from typing import Optional
 
 log = logging.getLogger(__name__)
 
@@ -23,8 +22,7 @@ from .category_clustering import (
     category_member_titles,
     inter_category_similarity,
 )
-from .embeddings import FakeEmbedder, update_category_embedding
-from .llm_naming import LLMNamer
+from .embeddings import update_category_embedding
 from .relevance import (
     MIN_RELEVANCE_TO_PROMOTE,
     cache_painpoint_relevance,
@@ -34,14 +32,14 @@ from .relevance import (
 # Tunables — see §10 of the plan.
 MIN_SUB_CLUSTER_SIZE = 5
 SPLIT_RECHECK_DELTA = 10
-MERGE_CATEGORY_THRESHOLD = 0.65
+MERGE_CATEGORY_THRESHOLD = 0.80
 MIN_CATEGORY_RELEVANCE = 1.0
 UNCATEGORIZED_NAME = "Uncategorized"
 
 # Sweep clustering threshold (cosine similarity) is *lower* than the
-# promoter's MERGE_COSINE_THRESHOLD (0.85). Layer B at promote time
+# promoter's MERGE_COSINE_THRESHOLD (see db/embeddings.py). Promote time
 # wants HIGH precision; sweep clustering at sweep time wants HIGH recall.
-SWEEP_CLUSTER_THRESHOLD = 0.40
+SWEEP_CLUSTER_THRESHOLD = 0.55
 
 
 # ---------------------------------------------------------------------------
@@ -58,6 +56,11 @@ class CategoryEvent:
     metric_name: str = ""
     metric_value: float = 0.0
     threshold: float = 0.0
+    # Pre-fetched LLM response, populated by prefetch_llm_for_event.
+    # If present, the _apply_* function uses this instead of making a
+    # fresh LLM call. Lets us parallelize LLM calls across events
+    # without releasing the merge_lock between them.
+    llm_result: Optional[dict] = None
 
 
 # ---------------------------------------------------------------------------
@@ -115,16 +118,34 @@ def propose_uncategorized_events(conn, embedder=None):
 # ---------------------------------------------------------------------------
 
 
-def propose_split_events(conn, embedder=None):
-    """Step 2: for each non-Uncategorized category whose member count has
-    grown by ≥ SPLIT_RECHECK_DELTA since the last check, propose
-    `add_category_split` if intra-bucket clustering finds ≥2 sub-clusters
-    of size ≥ MIN_SUB_CLUSTER_SIZE.
+def propose_split_events(conn, embedder=None, namer=None):
+    """Step 2: for each non-Uncategorized category that has grown by ≥
+    SPLIT_RECHECK_DELTA since the last check, ask the LLM whether to
+    split it.
+
+    Fixed-size-floor heuristics (MIN_SUB_CLUSTER_SIZE) kept producing
+    either "one giant blob" or "all tiny fragments" depending on the
+    clustering threshold — neither a reliable split signal. Instead we
+    now cluster the members, send the LLM a summary (category name,
+    description, total members, top cluster samples), and let the LLM
+    decide whether splitting makes semantic sense.
+
+    The LLM returns a SplitDecision with either "keep" or "split" plus
+    proposed sub-categories grouped by cluster indices.
     """
-    uncat_id = _uncategorized_id(conn)
+    if namer is None:
+        from .llm_naming import LLMNamer
+        namer = LLMNamer()
+
+    # Minimum category size to even consider splitting. Below this, the
+    # category can't plausibly have distinct sub-topics.
+    MIN_CATEGORY_SIZE_FOR_SPLIT = 10
+    # Top N clusters (by size) to show the LLM. Keeps the prompt bounded.
+    MAX_CLUSTERS_SHOWN = 10
+
     rows = conn.execute(
-        "SELECT id, name, parent_id, painpoint_count_at_last_check FROM categories "
-        "WHERE name != ?",
+        "SELECT id, name, description, parent_id, painpoint_count_at_last_check "
+        "FROM categories WHERE name != ?",
         (UNCATEGORIZED_NAME,),
     ).fetchall()
 
@@ -135,27 +156,70 @@ def propose_split_events(conn, embedder=None):
         ).fetchone()[0]
         last_count = cat["painpoint_count_at_last_check"] or 0
 
+        if current_count < MIN_CATEGORY_SIZE_FOR_SPLIT:
+            continue
         if current_count - last_count < SPLIT_RECHECK_DELTA:
             continue
 
         members = category_member_titles(conn, cat_id)
         clusters = cluster_painpoints(members, threshold=SWEEP_CLUSTER_THRESHOLD, embedder=embedder)
-        valid = [c for c in clusters if len(c) >= MIN_SUB_CLUSTER_SIZE]
 
-        # Always update the trigger snapshot — even if the split fails, we
-        # don't want to re-cluster on every sweep until the bucket grows
-        # by another SPLIT_RECHECK_DELTA.
+        # Always update the trigger snapshot — even on keep/error, we don't
+        # want to re-cluster and re-ask the LLM on every sweep.
         conn.execute(
             "UPDATE categories SET painpoint_count_at_last_check = ?, "
             "last_split_check_at = ? WHERE id = ?",
             (current_count, _now(), cat_id),
         )
 
-        if len(valid) < 2:
-            # Test would reject; skip the event entirely (audit trail still
-            # gets the rejected entry via the worker if you want it — see
-            # the trigger-discipline test in §9 for why we don't propose
-            # rejected events for stable buckets).
+        # Rank clusters by size and take the top N for the LLM prompt.
+        clusters_sorted = sorted(clusters, key=len, reverse=True)
+        top_clusters = clusters_sorted[:MAX_CLUSTERS_SHOWN]
+        cluster_payload = [
+            {"size": len(c), "sample_titles": [p["title"] for p in c[:3]]}
+            for c in top_clusters
+        ]
+
+        print(f"  [split-check] '{cat['name']}' ({current_count} members): "
+              f"top clusters sizes={[c['size'] for c in cluster_payload[:5]]}", flush=True)
+        try:
+            decision = namer.decide_split(
+                cat["name"], cat["description"] or "", current_count, cluster_payload,
+            )
+        except Exception as e:
+            print(f"  [split-check] LLM ERROR for '{cat['name']}': {type(e).__name__}: {e}",
+                  flush=True)
+            continue
+
+        print(f"  [split-check] LLM decision for '{cat['name']}': {decision.decision} "
+              f"({len(decision.subcategories)} subs) — {decision.reason[:80]}", flush=True)
+
+        if decision.decision != "split":
+            continue
+
+        # Build the subcategory payload, resolving cluster_indices back to
+        # painpoint ids. The LLM may group multiple clusters into one
+        # sub-category.
+        subcat_payload = []
+        covered_cluster_ids = set()
+        for sub in decision.subcategories:
+            indices = [i for i in sub.cluster_indices if 0 <= i < len(top_clusters)]
+            if not indices:
+                continue
+            covered_cluster_ids.update(indices)
+            pp_ids = []
+            for i in indices:
+                pp_ids.extend(p["id"] for p in top_clusters[i])
+            if not pp_ids:
+                continue
+            subcat_payload.append({
+                "name": sub.name,
+                "description": sub.description,
+                "painpoint_ids": pp_ids,
+            })
+
+        if len(subcat_payload) < 2:
+            # LLM said split but didn't provide ≥2 usable sub-groups. Skip.
             continue
 
         yield CategoryEvent(
@@ -164,12 +228,12 @@ def propose_split_events(conn, embedder=None):
                 "parent_category_id": cat["parent_id"],
                 "source_category_id": cat_id,
                 "source_category_name": cat["name"],
-                "clusters": [[p["id"] for p in c] for c in valid],
-                "cluster_titles": [[p["title"] for p in c] for c in valid],
+                "subcategories": subcat_payload,
+                "llm_reason": decision.reason,
             },
             target_category=cat_id,
-            metric_name="sub_cluster_count",
-            metric_value=float(len(valid)),
+            metric_name="llm_split_decision",
+            metric_value=float(len(subcat_payload)),
             threshold=2.0,
         )
 
@@ -304,7 +368,26 @@ def _test_delete_category(conn, event):
 
 
 def _test_merge_categories(conn, event):
-    """Already gated by MERGE_CATEGORY_THRESHOLD at proposal time."""
+    """Already gated by MERGE_CATEGORY_THRESHOLD at proposal time.
+
+    Pre-apply check: the merge proposer yields all candidate pairs at
+    once, but earlier merges in the same sweep may have deleted one of
+    the categories in this pair (cascade). Reject cleanly here rather
+    than crashing in apply.
+    """
+    survivor_id = event.payload["survivor_id"]
+    loser_id = event.payload["loser_id"]
+    exists = {
+        r["id"]
+        for r in conn.execute(
+            "SELECT id FROM categories WHERE id IN (?, ?)", (survivor_id, loser_id),
+        ).fetchall()
+    }
+    if survivor_id not in exists or loser_id not in exists:
+        return False, (
+            f"cascade: survivor {survivor_id} in={survivor_id in exists}, "
+            f"loser {loser_id} in={loser_id in exists}"
+        )
     return True, "similarity > threshold"
 
 
@@ -391,11 +474,16 @@ def _resolve_parent_id(conn, parent_name):
 
 
 def _apply_add_category_new(conn, event, namer):
-    roots, flat = _get_taxonomy_for_llm(conn)
-    name_resp = namer.name_new_category(
-        event.payload["sample_titles"], event.payload["sample_descriptions"],
-        existing_taxonomy=flat,
-    )
+    # Use pre-fetched LLM response if available (from prefetch_llm_for_event
+    # called concurrently before we entered the savepoint). Falls back to
+    # an inline call if not pre-fetched.
+    name_resp = event.llm_result
+    if name_resp is None:
+        _roots, flat = _get_taxonomy_for_llm(conn)
+        name_resp = namer.name_new_category(
+            event.payload["sample_titles"], event.payload["sample_descriptions"],
+            existing_taxonomy=flat,
+        )
     name = name_resp.get("name", "").strip()
     description = name_resp.get("description", "").strip()
     parent_name = name_resp.get("parent")
@@ -432,25 +520,22 @@ def _apply_add_category_new(conn, event, namer):
 
 
 def _apply_add_category_split(conn, event, namer):
+    """Apply an LLM-decided split. The payload already contains the
+    LLM's sub-category names + descriptions + painpoint groupings
+    (decided in propose_split_events). We just materialize them.
+    """
     parent_id = event.payload["parent_category_id"]
     source_id = event.payload["source_category_id"]
-    parent_name = event.payload["source_category_name"]
-    cluster_titles = event.payload["cluster_titles"]
-    clusters = event.payload["clusters"]
-
-    sub_resp = namer.name_split_subcategories(parent_name, cluster_titles)
-    if len(sub_resp) < len(clusters):
-        raise RuntimeError(
-            f"LLM returned {len(sub_resp)} sub-cats for {len(clusters)} clusters"
-        )
+    subcategories = event.payload["subcategories"]
 
     new_cat_ids = []
-    for cluster, sub in zip(clusters, sub_resp):
+    for sub in subcategories:
         name = (sub.get("name") or "").strip()
         description = (sub.get("description") or "").strip()
-        if not name:
-            raise RuntimeError("LLM returned empty sub-category name")
-        # Resolve / insert
+        pp_ids = sub.get("painpoint_ids") or []
+        if not name or not pp_ids:
+            continue
+
         existing = conn.execute(
             "SELECT id FROM categories WHERE name = ?", (name,)
         ).fetchone()
@@ -465,18 +550,34 @@ def _apply_add_category_split(conn, event, namer):
             sub_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         new_cat_ids.append(sub_id)
 
-        for pp_id in cluster:
+        for pp_id in pp_ids:
             conn.execute(
                 "UPDATE painpoints SET category_id = ?, last_updated = ? WHERE id = ?",
                 (sub_id, _now(), pp_id),
             )
+        # Keep the new sub-category's embedding fresh as members populate it.
+        update_category_embedding(conn, sub_id)
 
     # Retire the source category if it's now empty.
     remaining = conn.execute(
         "SELECT COUNT(*) FROM painpoints WHERE category_id = ?", (source_id,)
     ).fetchone()[0]
     if remaining == 0 and parent_id is not None:
+        # Clean up the source's embedding too, otherwise the orphaned
+        # vec row can still be returned by find_best_category and cause
+        # a FK failure on the next promote.
+        try:
+            conn.execute("DELETE FROM category_vec WHERE rowid = ?", (source_id,))
+        except Exception:
+            pass
         conn.execute("DELETE FROM categories WHERE id = ?", (source_id,))
+    elif remaining > 0:
+        # Partial split: the LLM didn't put every member into a
+        # sub-category, so the source category survives but its member
+        # set shrank. Refresh its centroid to match the current members,
+        # otherwise subsequent find_best_category calls would use the
+        # stale pre-split centroid.
+        update_category_embedding(conn, source_id)
 
     return new_cat_ids
 
@@ -490,25 +591,64 @@ def _apply_delete_category(conn, event, namer):
     if fallback_id is None:
         fallback_id = _uncategorized_id(conn)
 
+    # Check if there are actually any members to move (for the centroid
+    # refresh decision below — we only need to refresh the fallback's
+    # centroid if it gained new members).
+    moved_count = conn.execute(
+        "SELECT COUNT(*) FROM painpoints WHERE category_id = ?", (cat_id,)
+    ).fetchone()[0]
+
     conn.execute(
         "UPDATE painpoints SET category_id = ?, last_updated = ? WHERE category_id = ?",
         (fallback_id, _now(), cat_id),
     )
+    # Clean up this category's embedding from category_vec before the
+    # categories row is deleted — otherwise find_best_category can
+    # return the orphaned rowid and the next promote FK-fails.
+    try:
+        conn.execute("DELETE FROM category_vec WHERE rowid = ?", (cat_id,))
+    except Exception:
+        pass
     conn.execute("DELETE FROM categories WHERE id = ?", (cat_id,))
+
+    # Refresh the fallback parent's centroid — its member set just grew
+    # by `moved_count` painpoints. Skip when no members moved (test-only
+    # path where a delete is proposed against an empty category) or when
+    # the fallback is Uncategorized (which is centroid-exempt; the
+    # update function has its own guard, but we short-circuit for clarity).
+    if moved_count > 0:
+        update_category_embedding(conn, fallback_id)
+
     return cat_id
 
 
 def _apply_merge_categories(conn, event, namer):
+    """Apply a sibling-merge event.
+
+    Cascade-safe: earlier merges in the same sweep may have already
+    deleted one of the categories in this event (e.g., A→B merged in
+    iteration N, then N+1 tries to merge B with C, but B is gone). We
+    skip gracefully in that case rather than raising.
+    """
     survivor_id = event.payload["survivor_id"]
     loser_id = event.payload["loser_id"]
 
-    # Get names + sample titles for the LLM description
-    survivor_name = conn.execute(
+    survivor_row = conn.execute(
         "SELECT name FROM categories WHERE id = ?", (survivor_id,)
-    ).fetchone()["name"]
-    loser_name = conn.execute(
+    ).fetchone()
+    loser_row = conn.execute(
         "SELECT name FROM categories WHERE id = ?", (loser_id,)
-    ).fetchone()["name"]
+    ).fetchone()
+    if survivor_row is None or loser_row is None:
+        # One or both categories were merged away by an earlier event in
+        # this sweep — skip this one, it's effectively already resolved.
+        raise RuntimeError(
+            f"merge skipped: survivor={survivor_id} exists={survivor_row is not None}, "
+            f"loser={loser_id} exists={loser_row is not None} "
+            f"(likely cascade from earlier merge)"
+        )
+    survivor_name = survivor_row["name"]
+    loser_name = loser_row["name"]
     sample_titles = [
         r["title"] for r in conn.execute(
             "SELECT title FROM painpoints WHERE category_id IN (?, ?) LIMIT 10",
@@ -528,9 +668,20 @@ def _apply_merge_categories(conn, event, namer):
         pass
     conn.execute("DELETE FROM categories WHERE id = ?", (loser_id,))
 
-    # Ask LLM for an updated description covering the combined scope
-    desc_resp = namer.describe_merged_category(survivor_name, loser_name, sample_titles)
-    new_desc = desc_resp.get("description", "").strip()
+    # Use pre-fetched LLM response if available, else call inline.
+    desc_resp = event.llm_result
+    if desc_resp is None:
+        try:
+            desc_resp = namer.describe_merged_category(
+                survivor_name, loser_name, sample_titles,
+            )
+        except Exception as e:
+            log.warning("merge: describe_merged_category failed for '%s' + '%s': %s",
+                        survivor_name, loser_name, e)
+            desc_resp = None
+    new_desc = ""
+    if isinstance(desc_resp, dict):
+        new_desc = (desc_resp.get("description") or "").strip()
     if new_desc:
         conn.execute(
             "UPDATE categories SET description = ? WHERE id = ?",
@@ -603,3 +754,104 @@ def apply_with_test(conn, event, namer):
     conn.execute("RELEASE SAVEPOINT cat_event")
     log_event(conn, event, accepted=True, reason="applied")
     return True
+
+
+# ---------------------------------------------------------------------------
+# LLM prefetch — lets the worker parallelize LLM calls across events so
+# they happen concurrently instead of serially inside the lock.
+# ---------------------------------------------------------------------------
+
+
+def _prefetch_context(conn, event):
+    """Read everything the LLM call needs from the DB, under the merge
+    lock. Returns a context dict keyed by what prefetch_llm_one_event
+    will need. Split out so DB reads happen under the lock while the
+    network call happens outside it."""
+    if event.event_type == "add_category_new":
+        _roots, flat = _get_taxonomy_for_llm(conn)
+        return {"existing_taxonomy": flat}
+
+    if event.event_type == "merge_categories":
+        survivor_id = event.payload["survivor_id"]
+        loser_id = event.payload["loser_id"]
+        survivor_row = conn.execute(
+            "SELECT name FROM categories WHERE id = ?", (survivor_id,)
+        ).fetchone()
+        loser_row = conn.execute(
+            "SELECT name FROM categories WHERE id = ?", (loser_id,)
+        ).fetchone()
+        if survivor_row is None or loser_row is None:
+            return None
+        sample_titles = [
+            r["title"] for r in conn.execute(
+                "SELECT title FROM painpoints WHERE category_id IN (?, ?) LIMIT 10",
+                (survivor_id, loser_id),
+            ).fetchall()
+        ]
+        return {
+            "survivor_name": survivor_row["name"],
+            "loser_name": loser_row["name"],
+            "sample_titles": sample_titles,
+        }
+
+    return None  # event types without LLM calls in their apply path
+
+
+def prefetch_llm_one_event(event, namer, context):
+    """Make the LLM call for a single event using pre-read `context`.
+    Stores the result on `event.llm_result`. Safe to call from a
+    ThreadPoolExecutor — uses only the namer (thread-safe if the namer's
+    underlying client is thread-safe, which OpenAI's SDK is) and the
+    pre-read context dict. Does NOT touch the DB connection."""
+    if context is None:
+        return
+    try:
+        if event.event_type == "add_category_new":
+            event.llm_result = namer.name_new_category(
+                event.payload["sample_titles"],
+                event.payload["sample_descriptions"],
+                existing_taxonomy=context["existing_taxonomy"],
+            )
+        elif event.event_type == "merge_categories":
+            event.llm_result = namer.describe_merged_category(
+                context["survivor_name"],
+                context["loser_name"],
+                context["sample_titles"],
+            )
+    except Exception as e:
+        # Leave llm_result as None — the apply function will fall back
+        # to an inline call (or a sane default for merge description).
+        log.warning(
+            "prefetch LLM call failed for %s: %s — apply will retry inline",
+            event.event_type, e,
+        )
+
+
+def prefetch_llm_batch(conn, events, namer, max_workers=5):
+    """Fan out LLM calls for a list of events across a thread pool so
+    they happen concurrently instead of serially inside apply_with_test.
+
+    Contexts (DB reads) are built sequentially under the caller's lock.
+    The network calls happen in parallel without touching the DB.
+    Results are stored on each event's `llm_result` attribute.
+
+    Events whose type doesn't need an LLM call are silently skipped.
+    """
+    import concurrent.futures as cf
+
+    # Read contexts sequentially (needs DB conn, fast)
+    contexts = [(ev, _prefetch_context(conn, ev)) for ev in events]
+
+    # Fire LLM calls in parallel (no DB, pure network)
+    pending = [(ev, ctx) for ev, ctx in contexts if ctx is not None]
+    if not pending:
+        return
+    with cf.ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = [
+            pool.submit(prefetch_llm_one_event, ev, namer, ctx)
+            for ev, ctx in pending
+        ]
+        # Wait for all to finish — exceptions are swallowed inside
+        # prefetch_llm_one_event, so we just block on completion.
+        for f in futures:
+            f.result()

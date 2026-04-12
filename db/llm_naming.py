@@ -7,7 +7,35 @@ touching the OpenAI API.
 """
 
 import json
-from typing import Callable, List, Optional
+from typing import Callable, List, Literal, Optional
+
+from pydantic import BaseModel, Field
+
+
+# --- Structured output schemas ---
+
+class SplitSubcategory(BaseModel):
+    name: str = Field(description="Short sub-category name (2-4 words)")
+    description: str = Field(
+        description="Keyword-rich one-sentence description (30-50 words) covering "
+                    "the technologies, tools, and specific complaint keywords that "
+                    "future painpoints matching this sub-category would use"
+    )
+    cluster_indices: List[int] = Field(
+        description="Which cluster indices (from the input) belong to this sub-category. "
+                    "You may group multiple clusters under one sub-category."
+    )
+
+
+class SplitDecision(BaseModel):
+    decision: Literal["split", "keep"]
+    reason: str = Field(description="One-sentence explanation of why split or keep")
+    subcategories: List[SplitSubcategory] = Field(
+        default_factory=list,
+        description="Proposed sub-categories — only populated when decision is 'split'. "
+                    "Must cover all meaningful clusters; groupings should produce "
+                    "semantically distinct, keyword-rich sub-categories."
+    )
 
 
 class LLMNamer:
@@ -27,8 +55,41 @@ class LLMNamer:
         return self._client
 
     def _call(self, system, user):
+        """Plain JSON-mode call for name/description generation. Uses
+        gpt-4.1-mini — same reason as _call_structured (non-reasoning,
+        faster, reliable for naming tasks).
+
+        NOTE: OpenAI's json_object mode requires the word "json" to
+        appear in the input messages, otherwise a 400 is returned. We
+        append a canonical reminder to the user payload to guarantee
+        compliance regardless of what the caller serialized.
+        """
         from llm import llm_call
-        return llm_call(self._get_client(), system, user, max_tokens=400)
+        user_with_json = f"{user}\n\nReturn your answer as a single JSON object."
+        return llm_call(self._get_client(), system, user_with_json, max_tokens=400,
+                        model=self._STRUCTURED_MODEL)
+
+    # Sweep-time LLM calls (naming categories, deciding splits) are
+    # classification/naming tasks that don't need deep reasoning. Using a
+    # non-reasoning model avoids the "structured output returned None"
+    # issue (reasoning models burn the token budget on reasoning and
+    # never emit the schema) and is ~3-5× faster than gpt-5-nano.
+    _STRUCTURED_MODEL = "gpt-4.1-mini"
+
+    def _call_structured(self, system, user, response_model, max_tokens=2000):
+        """Call the LLM with a Pydantic schema for structured output. Returns
+        a validated model instance instead of a JSON string.
+
+        Uses gpt-4.1-mini (non-reasoning) — faster and more reliable for
+        structured output than gpt-5-nano.
+        """
+        from llm import llm_call
+        return llm_call(
+            self._get_client(), system, user,
+            max_tokens=max_tokens,
+            response_model=response_model,
+            model=self._STRUCTURED_MODEL,
+        )
 
     def name_new_category(self, sample_titles: List[str], sample_descriptions: List[str],
                           existing_taxonomy: Optional[List[dict]] = None):
@@ -99,6 +160,59 @@ class LLMNamer:
         return json.loads(raw)["subcategories"]
 
 
+    def decide_split(self, category_name: str, category_description: str,
+                     total_members: int, clusters: List[dict]) -> SplitDecision:
+        """Ask the LLM whether a bloated category should be split.
+
+        Uses OpenAI structured output — returns a validated `SplitDecision`
+        Pydantic model instance (no JSON parsing).
+
+        Args:
+            category_name: e.g. "AI Safety"
+            category_description: the current description text
+            total_members: how many painpoints are in the category
+            clusters: list of dicts with keys:
+                - 'size': int
+                - 'sample_titles': list of 2-3 strings
+
+        Returns a `SplitDecision` with `.decision`, `.reason`, `.subcategories`.
+        When `.decision == "split"`, `.subcategories[i].cluster_indices` references
+        positions in the input `clusters` list. The LLM is allowed to group
+        multiple clusters under one sub-category.
+        """
+        system = (
+            "You are a taxonomist reviewing a painpoint category using common sense. "
+            "You receive the category name, its description, total member count, and "
+            "top clusters found by embedding similarity (each with size + sample titles). "
+            "Use SEMANTIC JUDGMENT, not cluster-size balance. Decide split vs keep.\n\n"
+            "SPLIT when ANY of these is true:\n"
+            "  - The sample titles span multiple distinct topics that belong in different buckets\n"
+            "  - Significant chunks of content DON'T MATCH the category name/description "
+            "(the category has been 'hijacked' by mis-routed painpoints — split them out)\n"
+            "  - There are coherent sub-topics that would make sense as their own categories, "
+            "even if some are small\n\n"
+            "KEEP when all of:\n"
+            "  - Sample titles are all variations of one coherent topic\n"
+            "  - The content genuinely matches the category description\n\n"
+            "Cluster sizes DO NOT matter — a small but semantically distinct cluster is still "
+            "a valid sub-category. Trust the titles, not the sizes.\n\n"
+            "If you split, group clusters by topic (multiple cluster indices can go under one "
+            "sub-category). Sub-category descriptions MUST be keyword-rich (30-50 words) "
+            "covering specific technologies, tools, and complaint keywords — this is critical "
+            "for embedding-based routing of future painpoints.\n\n"
+            "Return your decision as a JSON object matching the schema."
+        )
+        user = json.dumps({
+            "category_name": category_name,
+            "category_description": category_description,
+            "total_members": total_members,
+            "clusters": [
+                {"index": i, "size": c["size"], "sample_titles": c["sample_titles"][:3]}
+                for i, c in enumerate(clusters)
+            ],
+        })
+        return self._call_structured(system, user, SplitDecision, max_tokens=1500)
+
     def describe_merged_category(self, survivor_name: str, loser_name: str,
                                   sample_member_titles: List[str]):
         """After merging two categories, generate an updated description
@@ -160,3 +274,22 @@ class FakeNamer:
     def describe_merged_category(self, survivor_name, loser_name,
                                  sample_member_titles):
         return {"description": f"Merged: {survivor_name} + {loser_name}"}
+
+    def decide_split(self, category_name, category_description, total_members, clusters):
+        """Test double: always returns 'keep' unless clusters has ≥2 clusters
+        of size ≥5 (mimicking the old threshold behaviour so existing tests
+        still pass). Returns a SplitDecision Pydantic model."""
+        eligible = [i for i, c in enumerate(clusters) if c["size"] >= 5]
+        if len(eligible) < 2:
+            return SplitDecision(decision="keep", reason="fake: too few big clusters",
+                                 subcategories=[])
+        subcats = [
+            SplitSubcategory(
+                name=f"{category_name}/Sub-{k + 1}",
+                description=f"fake sub-cluster {k + 1}",
+                cluster_indices=[ci],
+            )
+            for k, ci in enumerate(eligible[:4])
+        ]
+        return SplitDecision(decision="split", reason="fake: multiple big clusters",
+                             subcategories=subcats)

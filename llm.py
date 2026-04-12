@@ -1,6 +1,8 @@
 """
 Shared LLM utilities — debug logging, API calls, SQL execution.
-Used by both ingest.py and ideas.py.
+
+Used across the codebase: db/llm_naming.py (category naming),
+painpoint_extraction/ (extractor + judge), demo/analyzer.py.
 """
 
 import json

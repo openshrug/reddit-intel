@@ -1,88 +1,89 @@
 # Category taxonomy — edit this to add/remove categories.
 # Structure: top-level categories with children.
-# The LLM can propose new categories via pending_categories table.
+# Descriptions should be RICH with keywords that painpoint titles use —
+# embedding similarity matches categories to painpoints by description text.
 
 AI/ML:
-  desc: Artificial intelligence, machine learning, LLMs
+  desc: Artificial intelligence, machine learning, LLMs, neural networks, deep learning, model training
   children:
-    AI Coding Tools: IDEs, code completion, autonomous coding agents
-    LLM Infrastructure: Inference, serving, fine-tuning, training
-    Multi-Agent Systems: Agent orchestration, workflows, agent frameworks
-    AI Search & RAG: Retrieval-augmented generation, semantic search, vector DBs
-    Generative Media: Image/video/audio generation, AI design tools
-    AI Safety & Moderation: Content moderation, guardrails, evaluation
-    AI in Biotech: Drug discovery, protein folding, bio-AI
+    AI Coding Tools: AI code completion, Copilot, Cursor, code generation, AI pair programming, coding agents, hallucination in code suggestions, AI IDE assistants
+    LLM Infrastructure: LLM inference, model serving, GPU memory, quantization, context window, fine-tuning, LoRA, model hosting, vLLM, Ollama, inference speed, token throughput
+    Multi-Agent Systems: AI agent orchestration, multi-agent workflows, agent frameworks, LangChain agents, CrewAI, autonomous agents, tool-calling agents
+    AI Search & RAG: Retrieval-augmented generation, semantic search, vector databases, embedding search, document retrieval, Pinecone, Weaviate, chunking strategies
+    Generative Media: Image generation, Stable Diffusion, DALL-E, video generation, audio synthesis, AI design tools, Midjourney, text-to-image, text-to-video
+    AI Safety: LLM guardrails, prompt injection attacks, jailbreaks, AI model alignment, red teaming LLMs, hallucination detection, LLM output validation, AI evaluation harnesses, model safety filters (narrowly about AI/LLM safety — NOT about community moderation, content moderation on social platforms, or interpersonal/dating moderation)
+    AI in Biotech: Drug discovery, protein folding, AlphaFold, bio-informatics, genomics ML, clinical trial optimization
 
 Developer Tools:
-  desc: Software development infrastructure and productivity
+  desc: Software development infrastructure, programming tools, developer experience, build systems
   children:
-    IDEs & Editors: Code editors, language servers, extensions
-    CI/CD & DevOps: Build pipelines, deployment automation
-    Observability: Logs, metrics, traces, monitoring
-    API Tools: API development, testing, documentation
-    Version Control: Git hosting, code review, collaboration
+    IDEs & Editors: Code editors, VS Code, JetBrains, Neovim, language servers, LSP, extensions, syntax highlighting, debugging tools
+    CI/CD & DevOps: Build pipelines, GitHub Actions, Jenkins, GitLab CI, deployment automation, Docker builds, container registries, Terraform, infrastructure as code, build timeouts
+    Observability: Monitoring, logging, metrics, traces, dashboards, Grafana, Prometheus, Datadog, New Relic, APM, alerting, SLOs, uptime, performance monitoring, query timeouts in dashboards
+    API Tools: API development, REST, GraphQL, gRPC, API documentation, Swagger, Postman, API gateways, rate limiting, API versioning, webhook delivery
+    Version Control: Git hosting, GitHub, GitLab, Bitbucket, code review, pull requests, merge conflicts, branching strategies, monorepo tooling
 
 Cloud & Infrastructure:
-  desc: Compute, storage, networking, platforms
+  desc: Cloud computing, servers, networking, platforms, managed services, scaling
   children:
-    Compute & Hosting: Servers, containers, serverless
-    Data Centers: Physical infra, power, location
-    Edge & CDN: Edge computing, content delivery
-    Databases: SQL, NoSQL, time-series, vector
-    Cloud Platforms: AWS, GCP, Azure, alternatives
+    Compute & Hosting: Servers, containers, Kubernetes, serverless, Lambda, ECS, pod scheduling, autoscaling, node management, pod eviction, cluster scaling
+    Data Centers: Physical infrastructure, power, colocation, network fabric, rack management
+    Edge & CDN: Edge computing, content delivery, Cloudflare, CDN caching, edge functions, latency optimization
+    Databases: SQL databases, PostgreSQL, MySQL, MongoDB, Redis, connection pools, query performance, database migrations, indexing, vacuum, replication, connection exhaustion, pool management, cache eviction
+    Cloud Platforms: AWS, GCP, Azure, multi-cloud, cloud costs, cloud networking, VPC, IAM, cloud storage, S3
 
 Security & Privacy:
-  desc: Cybersecurity, auth, privacy tools
+  desc: Cybersecurity, authentication, authorization, privacy, compliance
   children:
-    Auth & Identity: KYC, SSO, passwordless, verification
-    Application Security: SAST, DAST, vuln scanning
-    Supply Chain Security: Dependency audit, SBOMs
-    Privacy Tools: E2E encryption, VPN, data protection
+    Auth & Identity: Authentication, OAuth, OAuth2, JWT, token refresh, session management, SSO, SAML, passwordless, MFA, OIDC, login flows, authorization, RBAC, identity providers, Keycloak, Auth0
+    Application Security: SAST, DAST, vulnerability scanning, XSS, SQL injection, CSRF, dependency vulnerabilities, secret scanning, code security
+    Supply Chain Security: Dependency auditing, SBOMs, package provenance, lockfile integrity, typosquatting, supply chain attacks
+    Privacy Tools: End-to-end encryption, VPN, data protection, GDPR compliance, data anonymization, consent management, PII handling
 
 Data & Analytics:
-  desc: Data pipelines, warehouses, analytics
+  desc: Data engineering, data pipelines, warehouses, analytics, business intelligence
   children:
-    Data Pipelines: ETL, streaming, orchestration
-    Data Warehouses: Lakehouse, OLAP
-    BI & Analytics: Dashboards, reporting
-    Data Quality: Observability, lineage, testing
+    Data Pipelines: ETL, ELT, streaming, Apache Kafka, Spark, Airflow, Dagster, data orchestration, batch processing, event streaming, data ingestion
+    Data Warehouses: Data lakehouse, Snowflake, BigQuery, Redshift, OLAP, columnar storage, data modeling, dbt
+    BI & Analytics: Dashboards, reporting, Metabase, Looker, Tableau, data visualization, KPI tracking, SQL analytics
+    Data Quality: Data observability, data lineage, schema testing, data contracts, great expectations, data freshness, data drift
 
 Hardware & Robotics:
-  desc: Physical computing, chips, robots
+  desc: Physical computing, chips, robots, embedded systems, hardware engineering
   children:
-    AI Chips: GPUs, TPUs, inference accelerators
-    Robotics: Autonomous systems, drones
-    IoT & Edge Devices: Sensors, embedded
-    Consumer Electronics: Phones, wearables, home
+    AI Chips: GPUs, TPUs, inference accelerators, NVIDIA, Apple Silicon, M-series chips, CUDA, ROCm, GPU memory, consumer GPU inference
+    Robotics: Autonomous systems, drones, robotic arms, ROS, computer vision, SLAM, motion planning
+    IoT & Edge Devices: Sensors, embedded systems, ESP32, Raspberry Pi, firmware, MQTT, device management
+    Consumer Electronics: Phones, wearables, smart home, AR/VR headsets
 
 Fintech:
-  desc: Financial services, payments, crypto
+  desc: Financial technology, payments, banking, crypto, insurance
   children:
-    Payments: Payment processing, Stripe-likes
-    Banking & Treasury: Neobanks, cash management
-    Crypto & Web3: Blockchain, DeFi, NFTs
-    InsurTech: Insurance products
+    Payments: Payment processing, Stripe, PayPal, payment gateways, checkout flows, webhook delivery, subscription billing, payment failures, refund processing, PCI compliance
+    Banking & Treasury: Neobanks, cash management, ledger systems, real-time payments, ACH, wire transfers
+    Crypto & Web3: Blockchain, DeFi, NFTs, smart contracts, Ethereum, Solana, wallet infrastructure, token standards
+    InsurTech: Insurance products, claims processing, underwriting automation, actuarial models
 
 Creator & Content:
-  desc: Tools for creators, content production, media
+  desc: Tools for creators, content production, media, publishing
   children:
-    Video Tools: Editing, demos, screen recording
-    Writing & Publishing: Blogs, newsletters, docs
-    Social Media Tools: Scheduling, analytics, management
-    Design Tools: Figma-likes, prototyping, assets
+    Video Tools: Video editing, screen recording, Loom, demo tools, video hosting, transcription, video compression
+    Writing & Publishing: Blog platforms, newsletters, documentation tools, CMS, Markdown editors, technical writing
+    Social Media Tools: Social scheduling, analytics, content management, cross-posting, audience growth
+    Design Tools: Figma, prototyping, UI design, design systems, asset management, wireframing, Canva alternatives
 
 Productivity & Workflow:
-  desc: Tools for individuals and teams to get work done
+  desc: Personal and team productivity, project management, knowledge management
   children:
-    Project Management: Task tracking, planning
-    Notes & Knowledge: Note apps, wikis, knowledge bases
-    Communication: Chat, video, async
-    Automation: No-code, workflow automation
+    Project Management: Task tracking, Jira, Linear, Asana, sprint planning, roadmaps, issue tracking, kanban boards
+    Notes & Knowledge: Note-taking apps, Notion, Obsidian, wikis, knowledge bases, second brain, PKM tools
+    Communication: Team chat, Slack, Discord, video conferencing, async communication, meeting tools
+    Automation: No-code platforms, Zapier, n8n, workflow automation, RPA, business process automation
 
 Business & Sales:
-  desc: CRM, sales, marketing, ops
+  desc: CRM, sales, marketing, customer operations, revenue tools
   children:
-    CRM & Sales: Pipeline, lead gen
-    Marketing Automation: Email, campaigns, attribution
-    Customer Support: Helpdesks, ticketing
-    HR & Recruiting: Hiring, onboarding, people ops
+    CRM & Sales: Sales pipelines, lead generation, Salesforce, HubSpot, deal tracking, sales automation, outbound tools
+    Marketing Automation: Email marketing, campaign management, attribution, SEO tools, landing pages, A/B testing
+    Customer Support: Help desks, ticketing systems, Zendesk, Intercom, chatbots, customer service, SLA management
+    HR & Recruiting: Hiring platforms, ATS, onboarding, people operations, payroll, employee engagement

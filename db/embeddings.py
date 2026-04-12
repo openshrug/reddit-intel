@@ -19,11 +19,12 @@ from typing import Optional
 
 EMBEDDING_MODEL = "text-embedding-3-small"
 EMBEDDING_DIM = 1536
-MERGE_COSINE_THRESHOLD = 0.70   # above this -> merge into existing painpoint
-# Tuned from real OpenAI text-embedding-3-small data:
-#   same-topic paraphrases: 0.72-0.78 cosine sim
-#   different topics:       0.23-0.29 cosine sim
-# 0.70 catches paraphrases while keeping different topics cleanly separate.
+MERGE_COSINE_THRESHOLD = 0.60   # above this -> merge into existing painpoint
+# Tuned empirically:
+#   same-topic paraphrases (colloquial): 0.72-0.78 cosine sim
+#   same-topic LLM-condensed titles:     0.55-0.70 cosine sim (shorter, more formal)
+#   different topics:                    0.23-0.29 cosine sim
+# 0.60 catches LLM-condensed duplicates while keeping different topics clearly separate.
 CATEGORY_COSINE_THRESHOLD = 0.3  # below this for ALL categories -> Uncategorized
 
 
@@ -44,13 +45,65 @@ class OpenAIEmbedder:
             self._client = openai.OpenAI()
         return self._client
 
-    def embed(self, text: str) -> list[float]:
+    def _embed_with_retry(self, inputs, retries=2, backoff_base=4):
+        """Call client.embeddings.create with exponential backoff on
+        transient errors. Matches the pattern in llm.py."""
+        import logging
+        import time
+        log = logging.getLogger(__name__)
         client = self._get_client()
-        resp = client.embeddings.create(
-            model=EMBEDDING_MODEL,
-            input=text,
-        )
+        last_exc = None
+        for attempt in range(1 + retries):
+            try:
+                return client.embeddings.create(
+                    model=EMBEDDING_MODEL, input=inputs
+                )
+            except Exception as exc:
+                last_exc = exc
+                if attempt >= retries:
+                    raise
+                delay = backoff_base * (2 ** attempt)
+                log.warning(
+                    "embed attempt %d/%d failed (%s), retrying in %ds",
+                    attempt + 1, 1 + retries, exc, delay,
+                )
+                time.sleep(delay)
+        raise last_exc
+
+    @staticmethod
+    def _sanitize(text):
+        """Empty / whitespace-only strings are unspecified behavior for
+        the OpenAI embeddings API (may error or return zero vector).
+        Replace with a single space so the API always returns a valid
+        embedding — callers never need to guard themselves."""
+        if text is None:
+            return " "
+        t = text.strip()
+        return t if t else " "
+
+    def embed(self, text: str) -> list[float]:
+        resp = self._embed_with_retry(self._sanitize(text))
         return resp.data[0].embedding
+
+    def embed_batch(self, texts: list[str], batch_size: int = 256) -> list[list[float]]:
+        """Embed a list of texts in one API call (or multiple if the list
+        is huge). Much faster than calling embed() in a loop — one HTTP
+        round-trip instead of N.
+
+        OpenAI accepts up to 2048 inputs per request; we chunk at 256
+        to keep individual requests under the 8192-token per-input cap
+        reasonably safe and to allow some concurrency in the server.
+        """
+        if not texts:
+            return []
+        sanitized = [self._sanitize(t) for t in texts]
+        out: list[list[float]] = []
+        for i in range(0, len(sanitized), batch_size):
+            chunk = sanitized[i : i + batch_size]
+            resp = self._embed_with_retry(chunk)
+            # resp.data is in request order
+            out.extend(item.embedding for item in resp.data)
+        return out
 
 
 class FakeEmbedder:
@@ -59,9 +112,12 @@ class FakeEmbedder:
     similar vectors. No API calls."""
 
     def embed(self, text: str) -> list[float]:
+        # Treat empty/None text as a placeholder word so we produce a
+        # deterministic non-zero vector. An all-zero vector matches every
+        # other vector at cosine_sim=0 which is a bad default.
+        if text is None or not text.strip():
+            text = "__empty__"
         words = text.lower().split()
-        if not words:
-            return [0.0] * EMBEDDING_DIM
         accum = [0.0] * EMBEDDING_DIM
         for word in words:
             h = hashlib.sha256(word.encode()).digest()
@@ -72,6 +128,9 @@ class FakeEmbedder:
         if norm > 0:
             accum = [x / norm for x in accum]
         return accum
+
+    def embed_batch(self, texts: list[str], batch_size: int = 256) -> list[list[float]]:
+        return [self.embed(t) for t in texts]
 
 
 # ---------------------------------------------------------------------------
@@ -240,7 +299,21 @@ def update_category_embedding(conn, category_id, embedder=None):
 
     If the category has no members with embeddings, remove its entry
     from category_vec.
+
+    Skips the Uncategorized sentinel — it's a dumping ground for
+    heterogeneous painpoints with no semantic coherence, so a centroid
+    would be a noisy vector that pulls future painpoints into
+    Uncategorized instead of real categories.
     """
+    # Never compute an embedding for the Uncategorized sentinel.
+    uncat_row = conn.execute(
+        "SELECT id FROM categories WHERE name = 'Uncategorized'"
+    ).fetchone()
+    if uncat_row and uncat_row["id"] == category_id:
+        # Make sure we don't have a stale vec entry from before this guard.
+        conn.execute("DELETE FROM category_vec WHERE rowid = ?", (category_id,))
+        return
+
     # Get all painpoint embeddings for this category
     member_ids = conn.execute(
         "SELECT id FROM painpoints WHERE category_id = ?",
@@ -254,6 +327,7 @@ def update_category_embedding(conn, category_id, embedder=None):
         return
 
     # Collect embeddings from painpoint_vec
+    expected_bytes = EMBEDDING_DIM * 4  # float32 = 4 bytes
     accum = [0.0] * EMBEDDING_DIM
     count = 0
     for row in member_ids:
@@ -262,11 +336,30 @@ def update_category_embedding(conn, category_id, embedder=None):
             "SELECT embedding FROM painpoint_vec WHERE rowid = ?",
             (pp_id,),
         ).fetchone()
-        if vec_row is not None:
-            emb = struct.unpack(f"{EMBEDDING_DIM}f", vec_row[0])
-            for i in range(EMBEDDING_DIM):
-                accum[i] += emb[i]
-            count += 1
+        if vec_row is None:
+            continue
+        blob = vec_row[0]
+        if len(blob) != expected_bytes:
+            # Dimension mismatch (stale embedding from a different model).
+            # Skip this painpoint rather than crash the whole centroid calc.
+            import logging
+            logging.getLogger(__name__).warning(
+                "painpoint_vec rowid=%s has %d bytes, expected %d "
+                "(dimension mismatch — skipping in centroid)",
+                pp_id, len(blob), expected_bytes,
+            )
+            continue
+        try:
+            emb = struct.unpack(f"{EMBEDDING_DIM}f", blob)
+        except struct.error as e:
+            import logging
+            logging.getLogger(__name__).warning(
+                "painpoint_vec rowid=%s unpack failed: %s — skipping", pp_id, e,
+            )
+            continue
+        for i in range(EMBEDDING_DIM):
+            accum[i] += emb[i]
+        count += 1
 
     if count == 0:
         conn.execute(

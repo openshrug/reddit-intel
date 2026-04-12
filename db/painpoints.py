@@ -1,4 +1,3 @@
-import json
 import logging
 import sqlite3
 
@@ -54,39 +53,58 @@ def save_pending_painpoints_batch(items):
     now = _now()
     ids = []
 
-    for item in items:
-        severity = max(1, min(10, int(item.get("severity", 5) or 5)))
-        category_id = get_category_id_by_name(item.get("category_name"))
-
-        comment_id = item.get("comment_id")
-        if comment_id is not None:
+    try:
+        for item in items:
+            post_id = item["post_id"]
+            # Validate post_id exists — the LLM can hallucinate post IDs not
+            # in the input, which would trip the FK constraint and poison the
+            # whole transaction.
             exists = conn.execute(
-                "SELECT 1 FROM comments WHERE id = ?", (comment_id,)
+                "SELECT 1 FROM posts WHERE id = ?", (post_id,)
             ).fetchone()
             if not exists:
-                log.warning("save_pending: comment_id %s not found, setting to NULL", comment_id)
-                comment_id = None
+                log.warning(
+                    "save_pending: post_id %s not found — skipping this painpoint "
+                    "(LLM hallucinated an ID?)", post_id,
+                )
+                continue
 
-        conn.execute(
-            """INSERT INTO pending_painpoints
-               (post_id, comment_id, category_id, title, description,
-                quoted_text, severity, extracted_at)
-               VALUES (?,?,?,?,?,?,?,?)""",
-            (
-                item["post_id"],
-                comment_id,
-                category_id,
-                item["title"],
-                item.get("description"),
-                item.get("quoted_text"),
-                severity,
-                now,
-            ),
-        )
-        ids.append(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+            severity = max(1, min(10, int(item.get("severity", 5) or 5)))
+            category_id = get_category_id_by_name(item.get("category_name"))
 
-    conn.commit()
-    conn.close()
+            comment_id = item.get("comment_id")
+            if comment_id is not None:
+                exists = conn.execute(
+                    "SELECT 1 FROM comments WHERE id = ?", (comment_id,)
+                ).fetchone()
+                if not exists:
+                    log.warning("save_pending: comment_id %s not found, setting to NULL", comment_id)
+                    comment_id = None
+
+            conn.execute(
+                """INSERT INTO pending_painpoints
+                   (post_id, comment_id, category_id, title, description,
+                    quoted_text, severity, extracted_at)
+                   VALUES (?,?,?,?,?,?,?,?)""",
+                (
+                    post_id,
+                    comment_id,
+                    category_id,
+                    item["title"],
+                    item.get("description"),
+                    item.get("quoted_text"),
+                    severity,
+                    now,
+                ),
+            )
+            ids.append(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
     return ids
 
 
@@ -262,11 +280,16 @@ def merge_painpoints(conn, survivor_id, loser_id):
       2. survivor.signal_count += loser.signal_count
       3. survivor.first_seen = min(survivor.first_seen, loser.first_seen)
       4. survivor.last_updated = now()
-      5. DELETE the loser row (cascade removes loser's embedding from
-         painpoint_vec via the row delete).
+      5. DELETE the loser's embedding from painpoint_vec.
+      6. DELETE the loser row from painpoints.
       7. survivor.category_id is **unchanged** — it keeps whatever category
          it was in. Deliberate-but-arbitrary.
       8. Logged via `logging.info` (NOT to category_events).
+
+    NOTE: This function is currently unused by the live pipeline — Layer
+    A multi-match merging was removed when embeddings replaced MinHash.
+    Kept as a utility in case we need programmatic painpoint merging
+    (e.g., a future admin / CLI command).
 
     Caller is responsible for the merge_lock; this function does not
     open/close its own transaction.
@@ -393,7 +416,11 @@ def _create_painpoint_from_pending(conn, pending_id, embedding=None, embedder=No
 
 
 def _link_pending_to_painpoint(conn, painpoint_id, pending_id):
-    """Link a pending pp into an existing merged painpoint and bump signal_count."""
+    """Link a pending pp into an existing merged painpoint, bump signal_count,
+    and refresh the category's embedding so the centroid stays in sync with
+    the new evidence."""
+    from .embeddings import update_category_embedding
+
     try:
         conn.execute(
             "INSERT INTO painpoint_sources (painpoint_id, pending_painpoint_id) VALUES (?, ?)",
@@ -405,16 +432,27 @@ def _link_pending_to_painpoint(conn, painpoint_id, pending_id):
             (_now(), painpoint_id),
         )
     except sqlite3.IntegrityError:
-        # Already linked — idempotent.
-        pass
+        # Already linked — idempotent; skip the centroid refresh too.
+        return
+
+    # Refresh the target painpoint's category centroid. Cheap (mean of
+    # member embeddings) and keeps tree traversal accurate as evidence
+    # accumulates.
+    row = conn.execute(
+        "SELECT category_id FROM painpoints WHERE id = ?", (painpoint_id,)
+    ).fetchone()
+    if row and row["category_id"] is not None:
+        update_category_embedding(conn, row["category_id"])
 
 
-def promote_pending(pending_id, *, embedder=None, now=None):
+def promote_pending(pending_id, *, embedder=None, embedding=None, now=None):
     """End-to-end promotion of one pending painpoint into the merged table.
 
     Steps:
       1. Compute relevance. If below threshold, hard-delete and return None.
-      2. Compute embedding (calls OpenAI API, outside the lock).
+      2. Compute embedding (calls OpenAI API, outside the lock) — unless
+         a pre-computed `embedding` was passed in (batch path from
+         promoter.run_once).
       3. Acquire the merge lock.
       4. Inside the lock: cosine similarity search against all existing
          painpoint embeddings. If above MERGE_COSINE_THRESHOLD → link.
@@ -452,17 +490,19 @@ def promote_pending(pending_id, *, embedder=None, now=None):
         conn.close()
 
     # Step 2 — compute embedding (outside the lock, may call OpenAI).
-    conn = get_db()
-    try:
-        pending = conn.execute(
-            "SELECT title, description FROM pending_painpoints WHERE id = ?",
-            (pending_id,),
-        ).fetchone()
-    finally:
-        conn.close()
+    # Skip if caller pre-computed it (batch path from promoter.run_once).
+    if embedding is None:
+        conn = get_db()
+        try:
+            pending = conn.execute(
+                "SELECT title, description FROM pending_painpoints WHERE id = ?",
+                (pending_id,),
+            ).fetchone()
+        finally:
+            conn.close()
 
-    text = f"{pending['title']} {pending['description'] or ''}".strip()
-    embedding = embedder.embed(text)
+        text = f"{pending['title']} {pending['description'] or ''}".strip()
+        embedding = embedder.embed(text)
 
     # Steps 3-4 — under the lock: cosine similarity → link or create.
     conn = get_db()
