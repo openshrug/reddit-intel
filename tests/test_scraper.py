@@ -375,13 +375,13 @@ class TestScrapeSubredditFull:
         )
         transport = httpx.MockTransport(handler)
         posts = await scrape_subreddit_full(
-            "test", comment_budget=2, _transport=transport,
+            "test", posts_with_comments=2, _transport=transport,
         )
         names = [p["name"] for p in posts]
         assert len(names) == len(set(names)), "duplicates found"
 
     @pytest.mark.asyncio
-    async def test_comment_budget_respected(self, monkeypatch):
+    async def test_posts_with_comments_respected(self, monkeypatch):
         handler, _ = _build_full_transport(posts_per_window=5)
 
         comment_fetches = 0
@@ -399,7 +399,7 @@ class TestScrapeSubredditFull:
         transport = httpx.MockTransport(counting_handler)
         budget = 3
         await scrape_subreddit_full(
-            "test", comment_budget=budget, _transport=transport,
+            "test", posts_with_comments=budget, _transport=transport,
         )
         assert comment_fetches == budget
 
@@ -420,7 +420,7 @@ class TestScrapeSubredditFull:
         )
         transport = httpx.MockTransport(tracking_handler)
         posts = await scrape_subreddit_full(
-            "test", comment_budget=100, min_score=9999,
+            "test", posts_with_comments=100, min_score=9999,
             _transport=transport,
         )
         assert len(comment_urls) == 0 or all(
@@ -461,7 +461,7 @@ class TestScrapeSubredditFull:
 
         transport = httpx.MockTransport(handler)
         posts = await scrape_subreddit_full(
-            "test", comment_budget=0, _transport=transport,
+            "test", posts_with_comments=0, _transport=transport,
         )
         assert len(posts) >= 1
 

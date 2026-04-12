@@ -148,7 +148,7 @@ are deduplicated by Reddit fullname (`name` field) and ranked by
 engagement (`score + num_comments`).
 
 Comments are the expensive part (1 request per post, no batch API).
-Only the top `comment_budget` posts by engagement get their comments
+Only the top `posts_with_comments` posts by engagement get their comments
 fetched. An optional `min_score` threshold further filters eligibility.
 
 ### Request budget (defaults)

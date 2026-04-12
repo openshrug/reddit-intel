@@ -22,14 +22,19 @@ log = logging.getLogger(__name__)
 CONFIG_FILE = Path(__file__).parent / "config.json"
 
 # --- Tunables ---
+# scrape_subreddit_full tunables
+POSTS_PER_WINDOW = 100 # Reddit returns up to 100 posts per request
+POSTS_WITH_COMMENTS = 60
+# one post comments retrieval tunables
+COMMENTS_PER_POST = 25
+COMMENT_DEPTH = 2 # 1 = top-level only, 2 = top-level + direct replies, etc.
+# request concurrency tunables
 CONCURRENT_REQUESTS = 10
 MAX_RETRIES = 3
 BACKOFF_BASE = 2.0  # seconds: 2, 4, 8
+# post/comment body length tunables
 MAX_POST_BODY_LEN = 10_000
 MAX_COMMENT_BODY_LEN = 5_000
-POSTS_PER_WINDOW = 100
-COMMENT_BUDGET = 60
-COMMENTS_PER_POST = 10
 
 _token_cache = {"token": None, "expires_at": 0}
 
@@ -225,14 +230,14 @@ async def scrape_subreddit(client, sem, subreddit, sort="hot",
     return posts
 
 
-async def scrape_comments(client, sem, permalink, limit=10):
+async def scrape_comments(client, sem, permalink, limit=10, depth=1):
     """Fetch top comments for a post. Returns list of comment dicts."""
     path = permalink.replace("https://reddit.com", "").replace("https://www.reddit.com", "")
     url = f"https://oauth.reddit.com{path}"
 
     resp = await _request(
         client, sem, "GET", url,
-        params={"limit": limit, "sort": "top", "depth": 1, "raw_json": 1},
+        params={"limit": limit, "sort": "top", "depth": depth, "raw_json": 1},
     )
 
     if resp.status_code != 200:
@@ -301,8 +306,9 @@ def _dedup_and_rank(listing_batches):
 # ============================================================
 
 async def scrape_subreddit_full(subreddit, *, posts_per_window=POSTS_PER_WINDOW,
-                                comment_budget=COMMENT_BUDGET, min_score=None,
+                                posts_with_comments=POSTS_WITH_COMMENTS, min_score=None,
                                 comments_per_post=COMMENTS_PER_POST,
+                                comment_depth=COMMENT_DEPTH,
                                 _transport=None):
     """Scrape a subreddit across week/month/year, dedup, and fetch
     comments for the top posts by engagement.
@@ -310,10 +316,12 @@ async def scrape_subreddit_full(subreddit, *, posts_per_window=POSTS_PER_WINDOW,
     Args:
         subreddit: Subreddit name (without ``r/``).
         posts_per_window: Max posts per time window listing (max 100).
-        comment_budget: How many posts get their comments fetched.
+        posts_with_comments: How many top posts get their comments fetched.
         min_score: If set, only posts with ``score >= min_score`` are
             eligible for comment fetching.
         comments_per_post: Max comments to fetch per post.
+        comment_depth: How deep into reply chains the API should return
+            (1 = top-level only, 2 = top-level + direct replies, etc.).
         _transport: Override httpx transport (for testing with MockTransport).
 
     Returns:
@@ -358,7 +366,7 @@ async def scrape_subreddit_full(subreddit, *, posts_per_window=POSTS_PER_WINDOW,
             targets = [p for p in unique if p["score"] >= min_score]
         else:
             targets = list(unique)
-        targets = targets[:comment_budget]
+        targets = targets[:posts_with_comments]
 
         # Phase 4 — fetch comments (parallel, errors logged per post)
         async def _attach_comments(post):
@@ -366,6 +374,7 @@ async def scrape_subreddit_full(subreddit, *, posts_per_window=POSTS_PER_WINDOW,
                 post["comments"] = await scrape_comments(
                     client, sem, post["permalink"],
                     limit=comments_per_post,
+                    depth=comment_depth,
                 )
             except Exception as exc:
                 log.warning("Comments failed for %s: %s", post["permalink"], exc)
@@ -434,7 +443,7 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
 
     sub = sys.argv[1] if len(sys.argv) > 1 else "programming"
-    posts = asyncio.run(scrape_subreddit_full(sub, comment_budget=5))
+    posts = asyncio.run(scrape_subreddit_full(sub, posts_with_comments=5))
     print(f"\nTotal: {len(posts)} unique posts")
     for p in posts[:10]:
         n_comments = len(p.get("comments", []))
