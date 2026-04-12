@@ -11,7 +11,7 @@ import logging
 
 import db
 from db.posts import upsert_post, upsert_comment
-from extractor import extract_painpoints
+from painpoint_extraction import extract_painpoints
 from reddit_scraper import scrape_subreddit_full
 
 log = logging.getLogger(__name__)

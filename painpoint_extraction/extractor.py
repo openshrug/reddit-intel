@@ -21,8 +21,8 @@ log = logging.getLogger(__name__)
 # --- Tunables ---
 MODEL = "gpt-5-nano"
 REASONING_EFFORT = "low"
-BATCH_TOKEN_BUDGET = 50_000
-LLM_CONCURRENCY = 3
+BATCH_TOKEN_BUDGET = 10_000
+LLM_CONCURRENCY = 10
 
 
 # --- Structured output schema ---
