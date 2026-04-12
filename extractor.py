@@ -27,13 +27,13 @@ LLM_CONCURRENCY = 3
 # --- Structured output schema ---
 
 class ExtractedPainpoint(BaseModel):
-    title: str
-    description: str
-    severity: int = Field(ge=1, le=10)
-    quoted_text: str
-    category_name: str
-    post_id: int
-    comment_id: int | None = None
+    title: str = Field(description="Concise name, e.g. 'Cursor AI suggests wrong imports'")
+    description: str = Field(description="1-2 sentence explanation of the pain")
+    severity: int = Field(ge=1, le=10, description="1 = minor annoyance, 10 = blocking/critical")
+    quoted_text: str = Field(description="Verbatim substring from the source post or comment")
+    category_name: str = Field(description="Must match a category from the taxonomy, or 'Uncategorized'")
+    post_id: int = Field(description="The [Post N] ID from the input")
+    comment_id: int | None = Field(default=None, description="The [Comment N] ID, or null if from the post body")
 
 
 class ExtractionResult(BaseModel):
@@ -47,22 +47,10 @@ You are a painpoint extraction engine. You will receive a batch of Reddit \
 posts with their comments. Your job is to identify every concrete user \
 painpoint expressed in the text.
 
-For each painpoint you find, return:
-- title: concise name (e.g. "Cursor AI suggests wrong imports")
-- description: 1-2 sentence explanation
-- severity: 1 (minor annoyance) to 10 (blocking/critical)
-- quoted_text: verbatim quote from the post or comment that evidences the pain
-- category_name: must match one of the categories listed below
-- post_id: the [Post N] ID from the input
-- comment_id: the [Comment N] ID if extracted from a comment, null if from \
-the post body
-
 Rules:
 - Extract EVERY painpoint you can find — this is an exhaustive sweep.
 - A single post/comment may contain zero, one, or many painpoints.
 - Different comments on the same post may yield different painpoints.
-- severity 8+ means "blocks entire workflows". severity 3 means "mild \
-annoyance".
 - quoted_text must be a verbatim substring from the source text.
 - If no category fits well, use "Uncategorized".
 
