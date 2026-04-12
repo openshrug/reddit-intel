@@ -20,6 +20,7 @@ log = logging.getLogger(__name__)
 
 # --- Tunables ---
 MODEL = "gpt-5-nano"
+REASONING_EFFORT = "low"
 BATCH_TOKEN_BUDGET = 50_000
 LLM_CONCURRENCY = 3
 
@@ -27,9 +28,9 @@ LLM_CONCURRENCY = 3
 # --- Structured output schema ---
 
 class ExtractedPainpoint(BaseModel):
-    title: str = Field(description="Concise name, e.g. 'Cursor AI suggests wrong imports'")
+    title: str = Field(description="Concise name revealing the essence of the pain")
     description: str = Field(description="1-2 sentence explanation of the pain")
-    severity: int = Field(ge=1, le=10, description="1 = minor annoyance, 10 = blocking/critical")
+    severity: int = Field(ge=1, le=10, description="1 = minor annoyance, 10 = blocking/critical, 5 - moderate annoyance, but not blocking")
     quoted_text: str = Field(description="Verbatim substring from the source post or comment")
     category_name: str = Field(description="Must match a category from the taxonomy, or 'Uncategorized'")
     post_id: int = Field(description="The [Post N] ID from the input")
@@ -95,10 +96,16 @@ async def extract_painpoints(post_ids, *, batch_token_budget=BATCH_TOKEN_BUDGET)
             batch_text = _format_batch(batch)
             log.info("extract: batch %d/%d (%d posts)",
                      batch_idx + 1, len(batches), len(batch))
-            result = await asyncio.to_thread(
-                llm_call, client, instructions, batch_text,
-                response_model=ExtractionResult, model=MODEL,
-            )
+            try:
+                result = await asyncio.to_thread(
+                    llm_call, client, instructions, batch_text,
+                    response_model=ExtractionResult, model=MODEL,
+                    max_tokens=None, reasoning_effort=REASONING_EFFORT,
+                )
+            except Exception as exc:
+                log.warning("extract: batch %d/%d failed: %s",
+                            batch_idx + 1, len(batches), exc)
+                return []
             log.info("extract: batch %d/%d -> %d painpoints",
                      batch_idx + 1, len(batches), len(result.painpoints))
             return result.painpoints

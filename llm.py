@@ -35,7 +35,8 @@ _logged = {}  # id(input) -> count already printed (for multi-turn lists)
 
 
 def llm_call(client, instructions, input, *, max_tokens=4000,
-             json_mode=True, response_model=None, model="gpt-5-nano"):
+             json_mode=True, response_model=None, model="gpt-5-nano",
+             reasoning_effort=None):
     """Call OpenAI Responses API with debug logging.
 
     Args:
@@ -43,13 +44,16 @@ def llm_call(client, instructions, input, *, max_tokens=4000,
         instructions: System-level instructions (maps to ``instructions``).
         input: User message string, or a list of message dicts for
             multi-turn conversations (``[{"role": "user", "content": ...}, ...]``).
-        max_tokens: Maximum output tokens.
+        max_tokens: Maximum output tokens.  ``None`` omits the cap (model
+            default).
         json_mode: When True and *response_model* is None, enforce JSON
             object output.  Ignored when *response_model* is set.
         response_model: Optional Pydantic ``BaseModel`` class.  When
             provided, the SDK enforces the schema server-side and returns
             a validated model instance instead of a string.
         model: Model name.
+        reasoning_effort: Optional reasoning effort level for reasoning
+            models (``"low"``, ``"medium"``, ``"high"``, etc.).
 
     Returns:
         ``str`` when *response_model* is None, otherwise a Pydantic model
@@ -69,24 +73,38 @@ def llm_call(client, instructions, input, *, max_tokens=4000,
             debug_msg("user", input)
 
     if response_model is not None:
-        resp = client.responses.parse(
+        parse_kwargs = dict(
             model=model,
             instructions=instructions,
             input=input,
             text_format=response_model,
-            max_output_tokens=max_tokens,
         )
-        result = resp.output_parsed
+        if max_tokens is not None:
+            parse_kwargs["max_output_tokens"] = max_tokens
+        if reasoning_effort is not None:
+            parse_kwargs["reasoning"] = {"effort": reasoning_effort}
+        resp = client.responses.parse(**parse_kwargs)
+        if resp.output_parsed is None:
+            refusal = getattr(resp, "refusal", None)
+            raw = resp.output_text if hasattr(resp, "output_text") else str(resp)
+            raise RuntimeError(
+                f"Structured output returned None"
+                f"{f' (refusal: {refusal})' if refusal else ''}"
+                f" — raw output: {raw[:500]}"
+            )
         if is_debug():
-            debug_msg("assistant", str(result))
-        return result
+            debug_msg("assistant", str(resp.output_parsed))
+        return resp.output_parsed
 
     kwargs = {
         "model": model,
         "instructions": instructions,
         "input": input,
-        "max_output_tokens": max_tokens,
     }
+    if max_tokens is not None:
+        kwargs["max_output_tokens"] = max_tokens
+    if reasoning_effort is not None:
+        kwargs["reasoning"] = {"effort": reasoning_effort}
     if json_mode:
         kwargs["text"] = {"format": {"type": "json_object"}}
 
