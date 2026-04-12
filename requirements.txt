@@ -1,6 +1,7 @@
 requests>=2.31.0
 httpx>=0.28.0
-openai>=1.30.0
+openai>=1.66.0
+pydantic>=2.0.0
 python-dotenv>=1.0.0
 pyyaml>=6.0
 fastapi>=0.110.0

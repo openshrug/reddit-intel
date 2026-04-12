@@ -375,14 +375,13 @@ def _filter_chunk(client, chunk_posts, chunk_id, on_event):
             text_lines.append(f"    {p['selftext'][:300]}")
     text = "\n".join(text_lines)
 
-    messages = [
-        {"role": "system", "content": FILTER_PROMPT},
-        {"role": "user", "content": f"Posts to filter (chunk {chunk_id}):\n\n{text}"},
-    ]
-
     try:
         with _heartbeat(on_event, "filter", f"chunk {chunk_id} thinking"):
-            data = json.loads(llm_call(client, messages, max_tokens=2000))
+            data = json.loads(llm_call(
+                client, FILTER_PROMPT,
+                f"Posts to filter (chunk {chunk_id}):\n\n{text}",
+                max_tokens=2000,
+            ))
     except Exception as e:
         _emit(on_event, "filter", "error", f"chunk {chunk_id}: {e}")
         raise RuntimeError(f"Filter chunk {chunk_id} failed: {e}") from e
@@ -463,16 +462,13 @@ def _extract_pass(client, subreddit, posts, theme_summary, on_event=None, max_it
         "Research with SQL or web if you need to, then commit (done:true)."
     )
 
-    messages = [
-        {"role": "system", "content": EXTRACT_PROMPT},
-        {"role": "user", "content": user_content},
-    ]
+    conversation = [{"role": "user", "content": user_content}]
 
     data = {}
     for iteration in range(max_iterations):
         try:
             with _heartbeat(on_event, "extract", f"iter {iteration + 1} thinking"):
-                raw = json.loads(llm_call(client, messages))
+                raw = json.loads(llm_call(client, EXTRACT_PROMPT, conversation))
         except Exception as e:
             _emit(on_event, "extract", "error", f"Extract failed: {e}")
             raise RuntimeError(f"Extract pass failed: {e}") from e
@@ -525,8 +521,8 @@ def _extract_pass(client, subreddit, posts, theme_summary, on_event=None, max_it
                     result = web_search(client, q)
                 research_parts.append(f"Web search ({reason}): {q}\nResult:\n{result[:1500]}")
 
-        messages.append({"role": "assistant", "content": json.dumps(data)})
-        messages.append({"role": "user", "content": "\n\n".join(research_parts)})
+        conversation.append({"role": "assistant", "content": json.dumps(data)})
+        conversation.append({"role": "user", "content": "\n\n".join(research_parts)})
 
     _emit(on_event, "extract", "done", "Reached max iterations")
     return data if isinstance(data, dict) else {}

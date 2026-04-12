@@ -125,6 +125,25 @@ def get_post_by_reddit_id(reddit_id):
     return dict(row) if row else None
 
 
+def get_posts_by_ids(post_ids):
+    """Fetch multiple posts by internal ID in one query.
+
+    Returns a dict mapping post_id -> post dict, preserving only IDs that
+    exist in the database.
+    """
+    if not post_ids:
+        return {}
+    conn = get_db()
+    placeholders = ",".join("?" * len(post_ids))
+    rows = conn.execute(
+        f"SELECT * FROM posts WHERE id IN ({placeholders})"
+        " ORDER BY (score + num_comments) DESC",
+        list(post_ids),
+    ).fetchall()
+    conn.close()
+    return {r["id"]: dict(r) for r in rows}
+
+
 def get_comments_for_post(post_id):
     conn = get_db()
     rows = conn.execute(

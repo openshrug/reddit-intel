@@ -2,7 +2,7 @@
 Subreddit analysis pipeline.
 
 Scrape one subreddit, persist posts+comments to DB, then run LLM
-extraction (stubbed for now).
+extraction to identify painpoints.
 
     await analyze("ExperiencedDevs")
 """
@@ -11,6 +11,7 @@ import logging
 
 import db
 from db.posts import upsert_post, upsert_comment
+from extractor import extract_painpoints
 from reddit_scraper import scrape_subreddit_full
 
 log = logging.getLogger(__name__)
@@ -33,7 +34,7 @@ async def analyze(subreddit, *, min_score=None):
     log.info("pipeline: persisted %d posts, %d comments",
              len(post_id_map), comments_count)
 
-    pending_ids = extract_painpoints(post_id_map)
+    pending_ids = await extract_painpoints(list(post_id_map.values()))
 
     return {
         "subreddit": subreddit,
@@ -42,17 +43,6 @@ async def analyze(subreddit, *, min_score=None):
         "comments_persisted": comments_count,
         "painpoints_extracted": len(pending_ids),
     }
-
-
-def extract_painpoints(post_id_map):
-    """Extract painpoints from persisted posts via LLM.
-
-    Stub — returns an empty list.  The real implementation will read
-    posts+comments from the DB, batch them, call the LLM, and write
-    to pending_painpoints.
-    """
-    log.info("extract_painpoints: not implemented yet, skipping")
-    return []
 
 
 def _persist_scrape(posts):

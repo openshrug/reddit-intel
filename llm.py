@@ -31,24 +31,67 @@ def debug_msg(role, content):
     print()
 
 
-_logged = {}  # id(messages) -> count already printed
+_logged = {}  # id(input) -> count already printed (for multi-turn lists)
 
 
-def llm_call(client, messages, max_tokens=4000, json_mode=True):
-    """Call OpenAI with debug logging. Only logs NEW messages per conversation."""
+def llm_call(client, instructions, input, *, max_tokens=4000,
+             json_mode=True, response_model=None, model="gpt-4.1-mini"):
+    """Call OpenAI Responses API with debug logging.
+
+    Args:
+        client: OpenAI client instance.
+        instructions: System-level instructions (maps to ``instructions``).
+        input: User message string, or a list of message dicts for
+            multi-turn conversations (``[{"role": "user", "content": ...}, ...]``).
+        max_tokens: Maximum output tokens.
+        json_mode: When True and *response_model* is None, enforce JSON
+            object output.  Ignored when *response_model* is set.
+        response_model: Optional Pydantic ``BaseModel`` class.  When
+            provided, the SDK enforces the schema server-side and returns
+            a validated model instance instead of a string.
+        model: Model name.
+
+    Returns:
+        ``str`` when *response_model* is None, otherwise a Pydantic model
+        instance.
+    """
     if is_debug():
-        key = id(messages)
-        already = _logged.get(key, 0)
-        for m in messages[already:]:
-            debug_msg(m["role"], m["content"])
-        _logged[key] = len(messages)
+        if isinstance(input, list):
+            key = id(input)
+            already = _logged.get(key, 0)
+            if already == 0:
+                debug_msg("system", instructions)
+            for m in input[already:]:
+                debug_msg(m["role"], m["content"])
+            _logged[key] = len(input)
+        else:
+            debug_msg("system", instructions)
+            debug_msg("user", input)
 
-    kwargs = {"model": "gpt-4.1-mini", "max_tokens": max_tokens, "messages": messages}
+    if response_model is not None:
+        resp = client.responses.parse(
+            model=model,
+            instructions=instructions,
+            input=input,
+            text_format=response_model,
+            max_output_tokens=max_tokens,
+        )
+        result = resp.output_parsed
+        if is_debug():
+            debug_msg("assistant", str(result))
+        return result
+
+    kwargs = {
+        "model": model,
+        "instructions": instructions,
+        "input": input,
+        "max_output_tokens": max_tokens,
+    }
     if json_mode:
-        kwargs["response_format"] = {"type": "json_object"}
+        kwargs["text"] = {"format": {"type": "json_object"}}
 
-    resp = client.chat.completions.create(**kwargs)
-    content = resp.choices[0].message.content
+    resp = client.responses.create(**kwargs)
+    content = resp.output_text
 
     if is_debug():
         debug_msg("assistant", content)

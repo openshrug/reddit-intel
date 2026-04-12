@@ -28,12 +28,7 @@ class LLMNamer:
 
     def _call(self, system, user):
         from llm import llm_call
-        client = self._get_client()
-        messages = [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ]
-        return llm_call(client, messages, max_tokens=400, json_mode=True)
+        return llm_call(self._get_client(), system, user, max_tokens=400)
 
     def name_new_category(self, sample_titles: List[str], sample_descriptions: List[str],
                           existing_taxonomy: Optional[List[dict]] = None):
