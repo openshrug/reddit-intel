@@ -341,29 +341,38 @@ def _pick_canonical_survivor(conn, candidate_ids):
     return rows[0]["id"]
 
 
-def _create_painpoint_in_uncategorized(conn, pending_id, lsh_index=None):
-    """§3.5 `create_new_in_uncategorized` action.
+def _create_painpoint_from_pending(conn, pending_id, lsh_index=None):
+    """Create a new merged painpoint from a pending painpoint.
 
-    Inserts a fresh `painpoints` row, points it at the Uncategorized
-    sentinel, and copies the triggering pending pp's ENTIRE source set
-    into `painpoint_sources` via the join table. The new merged pp's
-    sources = the triggering pending pp's sources, full stop (§11).
+    Uses the LLM-proposed category from extraction time if it resolved
+    to a real category in the taxonomy; falls back to the Uncategorized
+    sentinel if the LLM didn't propose one or proposed a name that
+    doesn't match any existing category (category_id would be NULL in
+    that case). The category worker can always re-classify later.
     """
     pending = conn.execute(
-        "SELECT id, title, description, severity FROM pending_painpoints WHERE id = ?",
+        "SELECT id, title, description, severity, category_id "
+        "FROM pending_painpoints WHERE id = ?",
         (pending_id,),
     ).fetchone()
     if pending is None:
         raise ValueError(f"pending_painpoint {pending_id} not found")
 
-    uncategorized_id = get_uncategorized_id(conn=conn)
+    category_id = pending["category_id"]
+    if category_id is None:
+        category_id = get_uncategorized_id(conn=conn)
+        log.debug(
+            "pending_painpoint %s has no resolved category — using Uncategorized",
+            pending_id,
+        )
+
     now = _now()
     conn.execute(
         "INSERT INTO painpoints "
         "(title, description, severity, signal_count, category_id, first_seen, last_updated) "
         "VALUES (?, ?, ?, 1, ?, ?, ?)",
         (pending["title"], pending["description"] or "", pending["severity"],
-         uncategorized_id, now, now),
+         category_id, now, now),
     )
     new_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
@@ -481,7 +490,7 @@ def promote_pending(pending_id, *, lsh_index=None, now=None):
                 pending["title"], pending["description"] or ""
             )
             if not text_matches:
-                new_id = _create_painpoint_in_uncategorized(
+                new_id = _create_painpoint_from_pending(
                     conn, pending_id, lsh_index=lsh_index
                 )
                 return new_id

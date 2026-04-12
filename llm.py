@@ -9,7 +9,7 @@ import textwrap
 
 from openai import OpenAI
 
-import database as db
+from db.queries import run_sql
 
 
 def is_debug():
@@ -69,7 +69,7 @@ def execute_sql_queries(sql_queries, max_queries=5, max_rows=20):
     for sq in sql_queries[:max_queries]:
         query = sq.get("query", "")
         reason = sq.get("reason", "")
-        result = db.run_sql(query)
+        result = run_sql(query)
         if isinstance(result, dict) and "error" in result:
             results.append(f"Query: {query}\nError: {result['error']}")
             print(f"    ✗ {reason}: {result['error']}")

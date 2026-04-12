@@ -1297,6 +1297,25 @@ but worth recording so the doc doesn't drift from the code:
    `db/relevance.py`, `db/similarity.py`, and `db/category_events.py`
    with comments noting "lift to config later." Fine for v1; loading
    from JSON adds wiring without changing behaviour.
+9. **Promoter uses LLM-proposed category from extraction time.** The
+   original design always parked new painpoints in Uncategorized.
+   Changed: `_create_painpoint_from_pending` now reads
+   `pending_painpoints.category_id` (set at extraction time when the
+   LLM proposes a `category_name`). If it resolved to a real category,
+   the painpoint goes directly there, skipping Uncategorized. Falls
+   back to Uncategorized only when the category_id is NULL. The worker
+   still re-classifies as needed.
+10. **LLM naming now proposes a parent category.** `name_new_category`
+    receives the existing taxonomy tree and the LLM returns a `parent`
+    field alongside `name` and `description`. The resolver
+    (`_resolve_parent_id`) handles the LLM's tendency to return the
+    full path format (`"Cloud & Infrastructure > Databases"`) by
+    parsing out each segment and trying them in order. If nothing
+    matches, falls back to root placement with a `logging.warning`.
+11. **`llm.py` import fix.** The old `import database as db` (monolithic
+    module removed in `ed4986f`) was replaced with
+    `from db.queries import run_sql`. Without this, every LLM naming
+    call failed with `No module named 'database'`.
 
 ### Test coverage map
 
@@ -1321,6 +1340,10 @@ but worth recording so the doc doesn't drift from the code:
 | End-to-end | `TestEndToEndSmoke` (1 test) |
 | **Stress / deadlock freedom** | `TestStressNoDeadlocks` (4 tests) |
 | **Realistic synthetic workflow** | `TestRealisticWorkflow` (3 tests) |
+
+| **Full lifecycle (decay + sweep)** | `TestFullLifecycleWithDecay` (2 tests — one with asserts, one for human inspection) |
+| §3.5 promoter category wiring | `TestPromoterCategoryAssignment` (4 tests — valid category, unknown category, no category, promoter never creates categories) |
+| **Live LLM integration** | `tests/test_live_llm_naming.py` (1 test, gated behind `OPENAI_API_KEY`, calls real API) |
 
 Stress tests assert three database invariants after every concurrent
 run: no orphan pending pps, `signal_count == COUNT(painpoint_sources)`

@@ -10,9 +10,12 @@ against test rejection, because every test is pre-mutation).
 """
 
 import json
+import logging
 import sqlite3
 from dataclasses import dataclass, field
 from typing import Any, List, Optional
+
+log = logging.getLogger(__name__)
 
 from . import _now
 from .category_clustering import (
@@ -328,16 +331,84 @@ def run_acceptance_test(conn, event):
 # ---------------------------------------------------------------------------
 
 
+def _get_taxonomy_for_llm(conn):
+    """Build the taxonomy tree for the LLM prompt.
+
+    Returns two things:
+    - roots: list of {"name": str, "description": str} for root categories
+    - flat: list of {"path": "Root > Child", ...} for the full tree
+
+    The LLM is shown both so it can pick a root to place the new
+    category under.
+    """
+    roots = conn.execute(
+        "SELECT name, description FROM categories "
+        "WHERE parent_id IS NULL AND name != ? ORDER BY name",
+        (UNCATEGORIZED_NAME,),
+    ).fetchall()
+    children = conn.execute("""
+        SELECT c.name AS child, p.name AS parent, c.description
+        FROM categories c
+        JOIN categories p ON c.parent_id = p.id
+        WHERE c.name != ?
+        ORDER BY p.name, c.name
+    """, (UNCATEGORIZED_NAME,)).fetchall()
+
+    root_list = [{"name": r["name"], "description": r["description"] or ""} for r in roots]
+    flat_list = [
+        {"path": f"{r['parent']} > {r['child']}", "name": r["child"],
+         "description": r["description"] or ""}
+        for r in children
+    ]
+    return root_list, flat_list
+
+
+def _resolve_parent_id(conn, parent_name):
+    """Resolve a parent category name returned by the LLM to a parent_id.
+
+    The LLM sometimes returns the full path format 'Root > Child' instead
+    of just the category name. We try both the raw string and the last
+    segment after '>'. Matches ANY existing category (root or child).
+    Returns None if the name is null/empty or doesn't match anything.
+    """
+    if not parent_name:
+        return None
+    candidates = [parent_name.strip()]
+    if ">" in parent_name:
+        # "Cloud & Infrastructure > Databases" → try "Databases" too
+        candidates.append(parent_name.split(">")[-1].strip())
+        # Also try the first segment: "Cloud & Infrastructure"
+        candidates.append(parent_name.split(">")[0].strip())
+    for name in candidates:
+        row = conn.execute(
+            "SELECT id FROM categories WHERE name = ?", (name,)
+        ).fetchone()
+        if row is not None:
+            return row["id"]
+    log.warning(
+        "LLM proposed parent=%r but no category matched (tried %s) — "
+        "falling back to root placement",
+        parent_name, candidates,
+    )
+    return None
+
+
 def _apply_add_category_new(conn, event, namer):
+    roots, flat = _get_taxonomy_for_llm(conn)
     name_resp = namer.name_new_category(
-        event.payload["sample_titles"], event.payload["sample_descriptions"]
+        event.payload["sample_titles"], event.payload["sample_descriptions"],
+        existing_taxonomy=flat,
     )
     name = name_resp.get("name", "").strip()
     description = name_resp.get("description", "").strip()
+    parent_name = name_resp.get("parent")
     if not name:
         raise RuntimeError("LLM returned empty category name")
 
-    # Name collision check — promote merge if exact-name match exists.
+    parent_id = _resolve_parent_id(conn, parent_name)
+
+    # Name collision check — if a category with this name already exists,
+    # reuse it instead of creating a duplicate.
     existing = conn.execute(
         "SELECT id FROM categories WHERE name = ?", (name,)
     ).fetchone()
@@ -346,8 +417,8 @@ def _apply_add_category_new(conn, event, namer):
     else:
         conn.execute(
             "INSERT INTO categories (name, parent_id, description, created_at) "
-            "VALUES (?, NULL, ?, ?)",
-            (name, description, _now()),
+            "VALUES (?, ?, ?, ?)",
+            (name, parent_id, description, _now()),
         )
         target_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 

@@ -680,21 +680,22 @@ class TestMergeLock:
 # ===========================================================================
 
 
-class TestPromoterDoesNotTouchCategories:
-    """§3.5 — the promoter is purely additive. It never creates, deletes, or
-    renames categories. New painpoints with no Layer A/B match land in the
-    Uncategorized sentinel."""
+class TestPromoterCategoryAssignment:
+    """The promoter uses the LLM-proposed category from extraction time
+    when it creates a new merged painpoint. Falls back to Uncategorized
+    when the LLM didn't propose one or the name didn't match any existing
+    category. The promoter never CREATES categories — it only points at
+    existing ones."""
 
-    def test_promote_does_not_create_new_categories(self, fresh_db):
+    def test_no_category_proposed_lands_in_uncategorized(self, fresh_db):
+        """Pending pp with no category_name → category_id NULL on the
+        pending row → merged painpoint goes to Uncategorized."""
         conn = db.get_db()
         try:
             cat_count_before = conn.execute("SELECT COUNT(*) FROM categories").fetchone()[0]
         finally:
             conn.close()
 
-        # Promote 3 painpoints with maximally distinct titles so Layer B
-        # doesn't link them together — we want 3 separate merged painpoints
-        # in Uncategorized.
         distinct_titles = [
             "Llama inference stalls Apple Silicon high context",
             "Postgres bulk insert deadlock under heavy load",
@@ -709,7 +710,7 @@ class TestPromoterDoesNotTouchCategories:
         try:
             cat_count_after = conn.execute("SELECT COUNT(*) FROM categories").fetchone()[0]
             assert cat_count_after == cat_count_before, (
-                "promoter must not touch the categories table"
+                "promoter must not create new categories"
             )
 
             uncat_id = conn.execute(
@@ -718,7 +719,98 @@ class TestPromoterDoesNotTouchCategories:
             in_uncat = conn.execute(
                 "SELECT COUNT(*) FROM painpoints WHERE category_id = ?", (uncat_id,)
             ).fetchone()[0]
-            assert in_uncat == 3, "all new painpoints must land in Uncategorized"
+            assert in_uncat == 3, (
+                "painpoints with no LLM-proposed category must land in Uncategorized"
+            )
+        finally:
+            conn.close()
+
+    def test_valid_category_proposed_lands_in_that_category(self, fresh_db):
+        """Pending pp with a valid category_name (exists in taxonomy) →
+        merged painpoint goes directly to that category, not Uncategorized."""
+        post_id = _make_post("t3_a", score=200, num_comments=50)
+        pp_id = save_pending_painpoint(
+            post_id,
+            "LLM context window problem qrs xyz",
+            category_name="LLM Infrastructure",
+            severity=8,
+        )
+        merged = promote_pending(pp_id)
+        assert merged is not None
+
+        conn = db.get_db()
+        try:
+            row = conn.execute(
+                "SELECT category_id FROM painpoints WHERE id = ?", (merged,)
+            ).fetchone()
+            expected_cat = conn.execute(
+                "SELECT id FROM categories WHERE name = 'LLM Infrastructure'"
+            ).fetchone()
+            assert expected_cat is not None, "test requires LLM Infrastructure in taxonomy"
+            assert row["category_id"] == expected_cat["id"], (
+                "painpoint should land in the LLM-proposed category, "
+                f"got category_id={row['category_id']} instead of {expected_cat['id']}"
+            )
+
+            # Confirm it's NOT in Uncategorized
+            uncat_id = conn.execute(
+                "SELECT id FROM categories WHERE name = 'Uncategorized'"
+            ).fetchone()["id"]
+            assert row["category_id"] != uncat_id
+        finally:
+            conn.close()
+
+    def test_unknown_category_proposed_falls_back_to_uncategorized(self, fresh_db):
+        """Pending pp with a category_name that doesn't match any existing
+        category → category_id is NULL on the pending row → falls back
+        to Uncategorized."""
+        post_id = _make_post("t3_a", score=200, num_comments=50)
+        pp_id = save_pending_painpoint(
+            post_id,
+            "Some unique pain xyz qrs mno",
+            category_name="Totally Nonexistent Category",
+            severity=8,
+        )
+        merged = promote_pending(pp_id)
+        assert merged is not None
+
+        conn = db.get_db()
+        try:
+            row = conn.execute(
+                "SELECT category_id FROM painpoints WHERE id = ?", (merged,)
+            ).fetchone()
+            uncat_id = conn.execute(
+                "SELECT id FROM categories WHERE name = 'Uncategorized'"
+            ).fetchone()["id"]
+            assert row["category_id"] == uncat_id, (
+                "unknown category should fall back to Uncategorized"
+            )
+        finally:
+            conn.close()
+
+    def test_promoter_does_not_create_categories(self, fresh_db):
+        """Even when the LLM proposes a valid category, the promoter uses
+        an existing one — it never INSERTs into the categories table."""
+        conn = db.get_db()
+        try:
+            cat_count_before = conn.execute("SELECT COUNT(*) FROM categories").fetchone()[0]
+        finally:
+            conn.close()
+
+        for i, cat_name in enumerate(["LLM Infrastructure", "CI/CD & DevOps", None]):
+            post_id = _make_post(f"t3_{i}", score=200, num_comments=50)
+            pp_id = save_pending_painpoint(
+                post_id, f"Pain {i} qrs xyz mno pqr {i*13}",
+                category_name=cat_name, severity=8,
+            )
+            promote_pending(pp_id)
+
+        conn = db.get_db()
+        try:
+            cat_count_after = conn.execute("SELECT COUNT(*) FROM categories").fetchone()[0]
+            assert cat_count_after == cat_count_before, (
+                "promoter must never create new categories"
+            )
         finally:
             conn.close()
 
@@ -1938,5 +2030,640 @@ class TestRealisticWorkflow:
             assert conn.execute(
                 "SELECT COUNT(*) FROM painpoints"
             ).fetchone()[0] == 1
+        finally:
+            conn.close()
+
+
+# ===========================================================================
+# Large synthetic lifecycle test — old categories die, fresh ones survive,
+# new categories make sense
+# ===========================================================================
+
+
+class TestFullLifecycleWithDecay:
+    """Simulate the realistic lifecycle of the entire system over a spread
+    of "time" (using age_seconds to fake freshness):
+
+      1. Create 3 "old" categories filled with stale painpoints (posted
+         months ago, low traction, low severity) — these should DECAY and
+         get deleted by the sweep.
+      2. Create 3 "active" categories filled with fresh, high-traction
+         painpoints — these should SURVIVE the sweep.
+      3. Create a batch of ~20 "new" painpoints that sit in Uncategorized
+         (the promoter parks them there because the LLM didn't propose a
+         valid category). These should form clusters during the sweep and
+         produce new auto-named categories.
+      4. Run the sweep. Then verify:
+         - Old categories are deleted (relevance mass decayed below
+           MIN_CATEGORY_RELEVANCE)
+         - Active categories are untouched (still have live members)
+         - New categories were created from the Uncategorized cluster
+         - The new categories contain the right number of painpoints
+         - Relevance values make sense: fresh > old
+    """
+
+    N_PER_OLD_CAT = 4       # painpoints per dying category
+    N_PER_ACTIVE_CAT = 4    # painpoints per surviving category
+    N_UNCATEGORIZED = 20     # new unassigned painpoints
+
+    OLD_AGE_DAYS = 90
+    FRESH_AGE_SECONDS = 3600  # 1 hour
+
+    def _create_category(self, conn, name, parent_id):
+        conn.execute(
+            "INSERT INTO categories (name, parent_id, description, created_at) "
+            "VALUES (?, ?, 'test', datetime('now'))",
+            (name, parent_id),
+        )
+        return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+    def _seed_painpoints_in_category(self, cat_id, titles, age_seconds, score,
+                                     num_comments, severity):
+        """Insert painpoints directly (bypassing promoter) into a specific
+        category, with a post source for each so relevance can be computed."""
+        ids = []
+        for i, title in enumerate(titles):
+            # Create the backing post
+            post_id = _make_post(
+                f"t3_cat{cat_id}_p{i}",
+                score=score, num_comments=num_comments,
+                age_seconds=age_seconds, title=title,
+            )
+            # Create a pending pp so the evidence chain is valid
+            pp_id = save_pending_painpoint(post_id, title, severity=severity)
+
+            conn = db.get_db()
+            try:
+                now = db._now()
+                conn.execute(
+                    "INSERT INTO painpoints (title, description, severity, signal_count, "
+                    "category_id, first_seen, last_updated) VALUES (?, '', ?, 1, ?, ?, ?)",
+                    (title, severity, cat_id, now, now),
+                )
+                new_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+                conn.execute(
+                    "INSERT INTO painpoint_sources (painpoint_id, pending_painpoint_id) "
+                    "VALUES (?, ?)",
+                    (new_id, pp_id),
+                )
+                conn.commit()
+                ids.append(new_id)
+            finally:
+                conn.close()
+        return ids
+
+    def test_full_lifecycle(self, fresh_db):
+        # ------------------------------------------------------------------
+        # Phase 1: set up the world
+        # ------------------------------------------------------------------
+        conn = db.get_db()
+        try:
+            parent_cat = conn.execute(
+                "SELECT id FROM categories WHERE parent_id IS NULL "
+                "AND name != 'Uncategorized' LIMIT 1"
+            ).fetchone()["id"]
+        finally:
+            conn.close()
+
+        # --- 3 old (dying) categories ---
+        old_cat_ids = []
+        old_titles_by_cat = {
+            "OldCat-A": [
+                "Legacy jQuery plugin conflict issue",
+                "Legacy jQuery plugin compat problem",
+                "Legacy jQuery plugin breaking change",
+                "Legacy jQuery plugin deprecation notice",
+            ],
+            "OldCat-B": [
+                "Flash Player EOL migration concerns",
+                "Flash Player EOL migration blockers",
+                "Flash Player EOL migration failures",
+                "Flash Player EOL migration cost issues",
+            ],
+            "OldCat-C": [
+                "Windows XP driver compatibility issue",
+                "Windows XP driver compatibility failure",
+                "Windows XP driver compatibility problem",
+                "Windows XP driver compatibility update",
+            ],
+        }
+        for cat_name, titles in old_titles_by_cat.items():
+            conn = db.get_db()
+            try:
+                cat_id = self._create_category(conn, cat_name, parent_cat)
+                conn.commit()
+            finally:
+                conn.close()
+            old_cat_ids.append(cat_id)
+            self._seed_painpoints_in_category(
+                cat_id, titles,
+                age_seconds=self.OLD_AGE_DAYS * 86400,
+                score=5, num_comments=1, severity=2,
+            )
+
+        # --- 3 active (surviving) categories ---
+        active_cat_ids = []
+        active_titles_by_cat = {
+            "ActiveCat-A": [
+                "React Server Components hydration mismatch bug",
+                "React Server Components hydration error report",
+                "React Server Components hydration failure case",
+                "React Server Components hydration inconsistency",
+            ],
+            "ActiveCat-B": [
+                "Docker build context too large in monorepo",
+                "Docker build context monorepo size problem",
+                "Docker build context monorepo slow transfer",
+                "Docker build context monorepo optimization",
+            ],
+            "ActiveCat-C": [
+                "TypeScript compiler extremely slow on large project",
+                "TypeScript compiler slow on large codebase build",
+                "TypeScript compiler performance large project",
+                "TypeScript compiler slow large project types",
+            ],
+        }
+        for cat_name, titles in active_titles_by_cat.items():
+            conn = db.get_db()
+            try:
+                cat_id = self._create_category(conn, cat_name, parent_cat)
+                conn.commit()
+            finally:
+                conn.close()
+            active_cat_ids.append(cat_id)
+            self._seed_painpoints_in_category(
+                cat_id, titles,
+                age_seconds=self.FRESH_AGE_SECONDS,
+                score=400, num_comments=100, severity=8,
+            )
+
+        # --- 20 Uncategorized painpoints forming ~4 clusters ---
+        # (Use similar titles within each cluster so they group at
+        # SWEEP_CLUSTER_THRESHOLD = 0.40; use distinct titles across
+        # clusters so they don't merge.)
+        uncat_cluster_titles = [
+            # Cluster 1 (5 pps)
+            "Redis cache eviction policy too aggressive production",
+            "Redis cache eviction policy too aggressive in prod",
+            "Redis cache eviction policy aggressive for production",
+            "Redis cache eviction policy aggressive production load",
+            "Redis cache eviction policy production too aggressive",
+            # Cluster 2 (5 pps)
+            "GraphQL N+1 query problem in nested resolvers",
+            "GraphQL N+1 query issue with nested resolvers",
+            "GraphQL N+1 query problem nested resolver depth",
+            "GraphQL N+1 query nested resolvers performance",
+            "GraphQL N+1 query nested resolvers slow response",
+            # Cluster 3 (5 pps)
+            "AWS Lambda cold start latency in VPC config",
+            "AWS Lambda cold start latency VPC configuration",
+            "AWS Lambda cold start VPC latency high delay",
+            "AWS Lambda cold start latency VPC setup slow",
+            "AWS Lambda cold start latency VPC config issue",
+            # Singletons (5 pps — should stay in Uncategorized)
+            "Unique issue about Terraform state locking drift",
+            "Bizarre Flutter rendering glitch on Android tablets",
+            "Obscure Elixir OTP supervisor crash recovery path",
+            "Niche Haskell monad transformer stack overflow",
+            "Rare Rust borrow checker false positive case",
+        ]
+        _seed_uncategorized_painpoints(uncat_cluster_titles, severity=7)
+
+        # ------------------------------------------------------------------
+        # Phase 2: verify pre-sweep state
+        # ------------------------------------------------------------------
+        conn = db.get_db()
+        try:
+            total_painpoints = conn.execute(
+                "SELECT COUNT(*) FROM painpoints"
+            ).fetchone()[0]
+            expected = (
+                len(old_titles_by_cat) * self.N_PER_OLD_CAT
+                + len(active_titles_by_cat) * self.N_PER_ACTIVE_CAT
+                + self.N_UNCATEGORIZED
+            )
+            assert total_painpoints == expected, (
+                f"expected {expected} painpoints, got {total_painpoints}"
+            )
+
+            # Check relevance spread: fresh should be way higher than old
+            from db.relevance import cache_painpoint_relevance
+            old_rels = []
+            for cat_id in old_cat_ids:
+                rows = conn.execute(
+                    "SELECT id FROM painpoints WHERE category_id = ?", (cat_id,)
+                ).fetchall()
+                for r in rows:
+                    old_rels.append(cache_painpoint_relevance(r["id"], conn=conn))
+
+            active_rels = []
+            for cat_id in active_cat_ids:
+                rows = conn.execute(
+                    "SELECT id FROM painpoints WHERE category_id = ?", (cat_id,)
+                ).fetchall()
+                for r in rows:
+                    active_rels.append(cache_painpoint_relevance(r["id"], conn=conn))
+        finally:
+            conn.close()
+
+        avg_old = sum(old_rels) / len(old_rels) if old_rels else 0
+        avg_active = sum(active_rels) / len(active_rels) if active_rels else 0
+        print(f"\n  Pre-sweep relevance: avg_old={avg_old:.4f} avg_active={avg_active:.4f}")
+        print(f"  Active/Old ratio: {avg_active / avg_old:.1f}x" if avg_old > 0 else "  Old is zero")
+
+        # Active relevance should dwarf old relevance
+        assert avg_active > avg_old * 10, (
+            f"active ({avg_active:.3f}) should be >>10x old ({avg_old:.3f})"
+        )
+
+        # Old category mass should be below MIN_CATEGORY_RELEVANCE
+        from db.category_events import category_relevance_mass, MIN_CATEGORY_RELEVANCE
+        for cat_id in old_cat_ids:
+            conn = db.get_db()
+            try:
+                mass = category_relevance_mass(conn, cat_id)
+                conn.commit()   # flush the cached-relevance writes
+            finally:
+                conn.close()
+            assert mass < MIN_CATEGORY_RELEVANCE, (
+                f"old cat {cat_id} mass {mass:.4f} should be below "
+                f"MIN_CATEGORY_RELEVANCE={MIN_CATEGORY_RELEVANCE}"
+            )
+
+        # Active category mass should be above MIN_CATEGORY_RELEVANCE
+        for cat_id in active_cat_ids:
+            conn = db.get_db()
+            try:
+                mass = category_relevance_mass(conn, cat_id)
+                conn.commit()
+            finally:
+                conn.close()
+            assert mass >= MIN_CATEGORY_RELEVANCE, (
+                f"active cat {cat_id} mass {mass:.4f} should be above "
+                f"MIN_CATEGORY_RELEVANCE={MIN_CATEGORY_RELEVANCE}"
+            )
+
+        # ------------------------------------------------------------------
+        # Phase 3: run the sweep
+        # ------------------------------------------------------------------
+        namer = FakeNamer()
+        summary = run_sweep(namer=namer)
+        print(f"  Sweep summary: {summary}")
+
+        # ------------------------------------------------------------------
+        # Phase 4: verify post-sweep state
+        # ------------------------------------------------------------------
+        conn = db.get_db()
+        try:
+            # Old categories should be DELETED
+            for cat_id in old_cat_ids:
+                row = conn.execute(
+                    "SELECT id, name FROM categories WHERE id = ?", (cat_id,)
+                ).fetchone()
+                assert row is None, (
+                    f"old category {cat_id} should have been deleted by the sweep"
+                )
+
+            # Active categories should SURVIVE
+            for cat_id in active_cat_ids:
+                row = conn.execute(
+                    "SELECT id, name FROM categories WHERE id = ?", (cat_id,)
+                ).fetchone()
+                assert row is not None, (
+                    f"active category {cat_id} should have survived the sweep"
+                )
+                # Each should still have its painpoints
+                member_count = conn.execute(
+                    "SELECT COUNT(*) FROM painpoints WHERE category_id = ?", (cat_id,)
+                ).fetchone()[0]
+                assert member_count == self.N_PER_ACTIVE_CAT, (
+                    f"active cat {cat_id} should still have {self.N_PER_ACTIVE_CAT} "
+                    f"members, got {member_count}"
+                )
+
+            # Uncategorized: the 3 clusters of 5 should have been promoted
+            # to auto-named categories; the 5 singletons stay in Uncategorized.
+            uncat_id = conn.execute(
+                "SELECT id FROM categories WHERE name = 'Uncategorized'"
+            ).fetchone()["id"]
+            remaining_in_uncat = conn.execute(
+                "SELECT COUNT(*) FROM painpoints WHERE category_id = ?", (uncat_id,)
+            ).fetchone()[0]
+
+            # New auto-named categories were created by the FakeNamer
+            auto_cats = conn.execute(
+                "SELECT id, name FROM categories WHERE name LIKE 'AutoCat-%'"
+            ).fetchall()
+            auto_cat_ids = [r["id"] for r in auto_cats]
+
+            # Sum of painpoints in auto-cats + remaining in Uncategorized
+            # should equal the original 20
+            in_auto = 0
+            for ac_id in auto_cat_ids:
+                count = conn.execute(
+                    "SELECT COUNT(*) FROM painpoints WHERE category_id = ?", (ac_id,)
+                ).fetchone()[0]
+                in_auto += count
+
+            assert in_auto + remaining_in_uncat == self.N_UNCATEGORIZED, (
+                f"auto-cat members ({in_auto}) + uncategorized ({remaining_in_uncat}) "
+                f"should sum to {self.N_UNCATEGORIZED}"
+            )
+
+            # The singletons (5 totally distinct titles) should mostly still be
+            # in Uncategorized (they can't cluster with anything)
+            assert remaining_in_uncat >= 3, (
+                f"at least 3 of the 5 singletons should still be in Uncategorized, "
+                f"got {remaining_in_uncat}"
+            )
+
+            # Each auto-named category should have a reasonable number of
+            # painpoints (cluster size was ~5; allow some flexibility because
+            # MinHash clustering at 0.40 isn't perfectly precise)
+            for ac in auto_cats:
+                count = conn.execute(
+                    "SELECT COUNT(*) FROM painpoints WHERE category_id = ?",
+                    (ac["id"],),
+                ).fetchone()[0]
+                assert 3 <= count <= 8, (
+                    f"auto-cat {ac['name']} has {count} members — expected 3-8 "
+                    f"(one cluster ≈ 5)"
+                )
+                print(f"  Auto-category {ac['name']}: {count} painpoints")
+
+            # Old painpoints that were in deleted categories should have been
+            # relinked to the parent category (not lost)
+            old_painpoint_count = conn.execute(
+                "SELECT COUNT(*) FROM painpoints WHERE category_id = ?",
+                (parent_cat,),
+            ).fetchone()[0]
+            expected_relinked = len(old_titles_by_cat) * self.N_PER_OLD_CAT
+            assert old_painpoint_count == expected_relinked, (
+                f"old painpoints should be relinked to parent (expected "
+                f"{expected_relinked}, got {old_painpoint_count})"
+            )
+
+            # Audit log should have entries for the deletes
+            delete_events = conn.execute(
+                "SELECT COUNT(*) FROM category_events "
+                "WHERE event_type = 'delete_category' AND accepted = 1"
+            ).fetchone()[0]
+            assert delete_events == len(old_cat_ids), (
+                f"expected {len(old_cat_ids)} accepted delete events, "
+                f"got {delete_events}"
+            )
+
+            # Audit log should have entries for the new categories
+            add_events = conn.execute(
+                "SELECT COUNT(*) FROM category_events "
+                "WHERE event_type = 'add_category_new' AND accepted = 1"
+            ).fetchone()[0]
+            assert add_events >= 1, "expected at least 1 accepted add_category_new event"
+
+            # --- Final invariant check ---
+            total_painpoints_after = conn.execute(
+                "SELECT COUNT(*) FROM painpoints"
+            ).fetchone()[0]
+            assert total_painpoints_after == expected, (
+                f"no painpoints should be lost: expected {expected}, "
+                f"got {total_painpoints_after}"
+            )
+        finally:
+            conn.close()
+
+        # ------------------------------------------------------------------
+        # Phase 5: second sweep is idempotent
+        # ------------------------------------------------------------------
+        summary2 = run_sweep(namer=namer)
+        for step_name, step in summary2.items():
+            assert step["accepted"] == 0, (
+                f"second sweep should be idempotent but {step_name} "
+                f"accepted {step['accepted']}"
+            )
+
+    def test_print_full_state_for_inspection(self, fresh_db):
+        """No asserts — runs the full lifecycle and prints the world state so
+        a human can eyeball whether the metrics / categories / assignments
+        make sense. Exercises ALL four sweep passes:
+
+          - delete:  old dying categories with decayed painpoints
+          - add_new: Uncategorized cluster → new auto-named category
+          - split:   one bloated category with two distinct sub-topics
+          - merge:   two sibling categories with near-identical members
+
+        Plus the promoter's LLM-proposed-category wiring (painpoints that
+        the LLM already labelled at extraction time go directly to the
+        right category, skipping Uncategorized entirely).
+
+        Run with:  pytest -s -k print_full_state
+        """
+        # --- seed ---
+        conn = db.get_db()
+        try:
+            parent_cat = conn.execute(
+                "SELECT id FROM categories WHERE parent_id IS NULL "
+                "AND name != 'Uncategorized' LIMIT 1"
+            ).fetchone()["id"]
+        finally:
+            conn.close()
+
+        # --- Old dying categories (delete targets) ---
+        groups_dying = {
+            "OldDying-jQuery": {
+                "titles": [
+                    "Legacy jQuery plugin conflict",
+                    "Legacy jQuery plugin deprecation",
+                    "Legacy jQuery plugin breaking",
+                    "Legacy jQuery plugin compat issue",
+                ],
+                "age_days": 120, "score": 3, "comments": 1, "severity": 2,
+            },
+            "OldDying-Flash": {
+                "titles": [
+                    "Flash Player EOL migration concern",
+                    "Flash Player EOL migration blocker",
+                    "Flash Player EOL migration failure",
+                ],
+                "age_days": 200, "score": 1, "comments": 0, "severity": 1,
+            },
+        }
+
+        # --- Active categories that should survive ---
+        groups_active = {
+            "Active-RSC": {
+                "titles": [
+                    "React Server Components hydration mismatch",
+                    "React Server Components hydration error",
+                    "React Server Components hydration failure",
+                    "React Server Components hydration bug report",
+                    "React Server Components hydration inconsistency",
+                ],
+                "age_days": 0.5, "score": 600, "comments": 150, "severity": 9,
+            },
+        }
+
+        # --- Bloated category (split target): two distinct sub-topics
+        # each with ≥ MIN_SUB_CLUSTER_SIZE (5) painpoints, all in one
+        # category. The sweep should split it into two sub-categories. ---
+        bloated_titles = {
+            "Bloated-Mixed": {
+                "titles": [
+                    # Sub-cluster A: GitHub Actions timeouts
+                    "GitHub Actions timeout monorepo build slow",
+                    "GitHub Actions timeout monorepo build hangs",
+                    "GitHub Actions timeout monorepo build fails",
+                    "GitHub Actions timeout monorepo build retry",
+                    "GitHub Actions timeout monorepo build flake",
+                    # Sub-cluster B: Postgres connection pool
+                    "Postgres connection pool exhausted high traffic",
+                    "Postgres connection pool exhausted heavy traffic",
+                    "Postgres connection pool exhausted traffic spikes",
+                    "Postgres connection pool exhausted traffic surge",
+                    "Postgres connection pool exhausted peak load now",
+                ],
+                "age_days": 1, "score": 300, "comments": 80, "severity": 7,
+            },
+        }
+
+        # --- Merge targets: two sibling categories with near-identical
+        # member titles (the sweep should merge them into one) ---
+        merge_groups = {
+            "MergeSib-A": {
+                "titles": [
+                    "Kubernetes pod eviction during autoscaling events",
+                    "Kubernetes pod eviction during cluster scaling",
+                ],
+                "age_days": 1, "score": 200, "comments": 40, "severity": 7,
+            },
+            "MergeSib-B": {
+                "titles": [
+                    "Kubernetes pod eviction during autoscaling cycles",
+                    "Kubernetes pod eviction during scaling actions",
+                ],
+                "age_days": 1, "score": 200, "comments": 40, "severity": 7,
+            },
+        }
+
+        # Create all the categories and populate them
+        for group_set in [groups_dying, groups_active, bloated_titles, merge_groups]:
+            for group_name, cfg in group_set.items():
+                conn = db.get_db()
+                try:
+                    cat_id = self._create_category(conn, group_name, parent_cat)
+                    # For the bloated category, set painpoint_count_at_last_check=0
+                    # so SPLIT_RECHECK_DELTA fires
+                    conn.execute(
+                        "UPDATE categories SET painpoint_count_at_last_check = 0 "
+                        "WHERE id = ?", (cat_id,),
+                    )
+                    conn.commit()
+                finally:
+                    conn.close()
+                self._seed_painpoints_in_category(
+                    cat_id, cfg["titles"],
+                    age_seconds=int(cfg["age_days"] * 86400),
+                    score=cfg["score"], num_comments=cfg["comments"],
+                    severity=cfg["severity"],
+                )
+
+        # Uncategorized painpoints that should cluster → add_category_new
+        _seed_uncategorized_painpoints([
+            "Redis cache eviction too aggressive production env",
+            "Redis cache eviction aggressive production load",
+            "Redis cache eviction too aggressive in production",
+            "Redis cache eviction production aggressive policy",
+            "Redis cache eviction aggressive for production",
+            "Totally unique Terraform state locking drift",
+            "Bizarre Flutter rendering glitch tablet devices",
+        ])
+
+        # Also test the promoter's LLM-proposed category wiring:
+        # create a painpoint that the LLM labelled at extraction time
+        llm_labeled_post = _make_post(
+            "t3_llm_labeled", score=400, num_comments=100, age_seconds=3600,
+        )
+        llm_labeled_pp = save_pending_painpoint(
+            llm_labeled_post,
+            "AI coding assistant hallucination problem",
+            category_name="AI Coding Tools",   # exists in taxonomy
+            severity=8,
+        )
+        promote_pending(llm_labeled_pp)
+
+        # --- run the sweep ---
+        namer = FakeNamer()
+        summary = run_sweep(namer=namer)
+
+        # --- print everything ---
+        conn = db.get_db()
+        try:
+            print("\n" + "=" * 80)
+            print("FULL STATE AFTER LIFECYCLE (no asserts — human inspection)")
+            print("=" * 80)
+
+            print(f"\nSweep summary: {json.dumps(summary, indent=2)}")
+
+            print("\n--- Categories ---")
+            cats = conn.execute(
+                "SELECT c.id, c.name, c.parent_id, p.name AS parent_name, "
+                "c.painpoint_count_at_last_check "
+                "FROM categories c LEFT JOIN categories p ON p.id = c.parent_id "
+                "ORDER BY COALESCE(p.name, c.name), c.parent_id IS NULL DESC, c.name"
+            ).fetchall()
+            for c in cats:
+                member_count = conn.execute(
+                    "SELECT COUNT(*) FROM painpoints WHERE category_id = ?",
+                    (c["id"],),
+                ).fetchone()[0]
+                print(f"  [{c['id']:>3}] {c['name']:<40} "
+                      f"parent={c['parent_name'] or '(root)':<20} "
+                      f"members={member_count}")
+
+            print("\n--- Painpoints (with relevance + category) ---")
+            pps = conn.execute(
+                "SELECT p.id, p.title, p.severity, p.signal_count, p.relevance, "
+                "c.name AS category, p.first_seen "
+                "FROM painpoints p "
+                "LEFT JOIN categories c ON c.id = p.category_id "
+                "ORDER BY p.relevance DESC NULLS LAST"
+            ).fetchall()
+            print(f"  {'id':>4} {'relevance':>10} {'sig_cnt':>7} {'sev':>4} "
+                  f"{'category':<30} title")
+            print(f"  {'-'*4} {'-'*10} {'-'*7} {'-'*4} {'-'*30} {'-'*40}")
+            for p in pps:
+                rel_str = f"{p['relevance']:.4f}" if p['relevance'] is not None else "NULL"
+                print(f"  {p['id']:>4} {rel_str:>10} {p['signal_count']:>7} "
+                      f"{p['severity']:>4} {(p['category'] or 'NULL'):<30} "
+                      f"{p['title'][:50]}")
+
+            print("\n--- Category Events (audit log) ---")
+            events = conn.execute(
+                "SELECT event_type, accepted, metric_name, metric_value, "
+                "threshold, reason, target_category "
+                "FROM category_events ORDER BY id"
+            ).fetchall()
+            for e in events:
+                acc = "ACCEPTED" if e["accepted"] else "REJECTED"
+                print(f"  {e['event_type']:<25} {acc:<10} "
+                      f"{e['metric_name']}={e['metric_value']:.3f} "
+                      f"(threshold={e['threshold']:.3f})  "
+                      f"reason={e['reason']}")
+
+            print("\n--- Summary stats ---")
+            total = conn.execute("SELECT COUNT(*) FROM painpoints").fetchone()[0]
+            total_cats = conn.execute(
+                "SELECT COUNT(*) FROM categories"
+            ).fetchone()[0]
+            uncat_count = conn.execute(
+                "SELECT COUNT(*) FROM painpoints WHERE category_id = "
+                "(SELECT id FROM categories WHERE name = 'Uncategorized')"
+            ).fetchone()[0]
+            print(f"  Total painpoints: {total}")
+            print(f"  Total categories: {total_cats}")
+            print(f"  In Uncategorized: {uncat_count}")
+            print(f"  In auto-named:   "
+                  f"{conn.execute('SELECT COUNT(*) FROM painpoints WHERE category_id IN (SELECT id FROM categories WHERE name LIKE ?)', ('AutoCat-%',)).fetchone()[0]}")
+
+            print("=" * 80)
         finally:
             conn.close()
