@@ -1,15 +1,33 @@
-"""Clustering primitives for the category worker (§5.1 steps 1, 2, 4).
+"""Clustering primitives for the category worker.
 
-All operations reuse the §3.2 text-MinHash primitive — we don't bring in
-embeddings or any other similarity tool, per the §11 "no vectors" rule.
+Uses embedding cosine similarity instead of MinHash for all clustering
+and inter-category similarity operations.
 
-- Intra-bucket clustering (steps 1 and 2): take a list of painpoints,
-  build connected components in a similarity graph at SIM_THRESHOLD.
-- Inter-category similarity (step 4): the maximum pairwise text MinHash
-  similarity between any two members of the two categories.
+- Intra-bucket clustering: build connected components in a similarity
+  graph at a cosine threshold.
+- Inter-category similarity: cosine similarity between category
+  embedding vectors.
 """
 
-from .similarity import SIM_THRESHOLD, make_minhash
+import math
+import struct
+
+from .embeddings import (
+    EMBEDDING_DIM,
+    FakeEmbedder,
+    _pack_embedding,
+    MERGE_COSINE_THRESHOLD,
+)
+
+
+def _cosine_sim(a, b):
+    """Cosine similarity between two embedding vectors."""
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_b = math.sqrt(sum(x * x for x in b))
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return dot / (norm_a * norm_b)
 
 
 def _components(items, edges):
@@ -36,11 +54,11 @@ def _components(items, edges):
     return list(groups.values())
 
 
-def cluster_painpoints(painpoints, threshold=SIM_THRESHOLD):
-    """Group a list of painpoint dicts into clusters by text similarity.
+def cluster_painpoints(painpoints, threshold=0.40, embedder=None):
+    """Group a list of painpoint dicts into clusters by embedding similarity.
 
     Each painpoint must have `id`, `title`, and `description` fields. Two
-    painpoints are connected if their MinHash signatures match above
+    painpoints are connected if their embedding cosine similarity is above
     `threshold`. Returns a list of clusters, each a list of painpoint dicts.
 
     Singletons are returned as 1-element clusters.
@@ -50,14 +68,22 @@ def cluster_painpoints(painpoints, threshold=SIM_THRESHOLD):
     if len(painpoints) == 1:
         return [list(painpoints)]
 
-    sigs = {p["id"]: make_minhash(p["title"], p.get("description") or "") for p in painpoints}
+    if embedder is None:
+        embedder = FakeEmbedder()
+
+    # Compute embeddings for each painpoint
+    sigs = {}
+    for p in painpoints:
+        text = f"{p['title']} {p.get('description') or ''}".strip()
+        sigs[p["id"]] = embedder.embed(text)
 
     edges = []
     ids = list(sigs.keys())
     for i in range(len(ids)):
         for j in range(i + 1, len(ids)):
             a, b = ids[i], ids[j]
-            if sigs[a].jaccard(sigs[b]) >= threshold:
+            sim = _cosine_sim(sigs[a], sigs[b])
+            if sim >= threshold:
                 edges.append((a, b))
 
     by_id = {p["id"]: p for p in painpoints}
@@ -74,26 +100,53 @@ def category_member_titles(conn, category_id):
     return [dict(r) for r in rows]
 
 
-def inter_category_similarity(conn, cat_a_id, cat_b_id):
-    """Max pairwise text MinHash similarity between any two members of the
-    two categories. Used by sweep step 4 to decide merge_categories.
+def inter_category_similarity(conn, cat_a_id, cat_b_id, embedder=None):
+    """Cosine similarity between two categories' embedding vectors.
+
+    If either category has no embedding in category_vec, falls back to
+    computing max pairwise member similarity.
 
     Returns 0.0 if either category is empty.
     """
+    # Try category embeddings first
+    vec_a = conn.execute(
+        "SELECT embedding FROM category_vec WHERE rowid = ?",
+        (cat_a_id,),
+    ).fetchone()
+    vec_b = conn.execute(
+        "SELECT embedding FROM category_vec WHERE rowid = ?",
+        (cat_b_id,),
+    ).fetchone()
+
+    if vec_a is not None and vec_b is not None:
+        emb_a = list(struct.unpack(f"{EMBEDDING_DIM}f", vec_a[0]))
+        emb_b = list(struct.unpack(f"{EMBEDDING_DIM}f", vec_b[0]))
+        return _cosine_sim(emb_a, emb_b)
+
+    # Fallback: max pairwise member similarity
+    if embedder is None:
+        embedder = FakeEmbedder()
+
     members_a = category_member_titles(conn, cat_a_id)
     members_b = category_member_titles(conn, cat_b_id)
     if not members_a or not members_b:
         return 0.0
 
-    sigs_a = [make_minhash(p["title"], p.get("description") or "") for p in members_a]
-    sigs_b = [make_minhash(p["title"], p.get("description") or "") for p in members_b]
+    sigs_a = [
+        embedder.embed(f"{p['title']} {p.get('description') or ''}".strip())
+        for p in members_a
+    ]
+    sigs_b = [
+        embedder.embed(f"{p['title']} {p.get('description') or ''}".strip())
+        for p in members_b
+    ]
 
     best = 0.0
     for sa in sigs_a:
         for sb in sigs_b:
-            j = sa.jaccard(sb)
-            if j > best:
-                best = j
+            sim = _cosine_sim(sa, sb)
+            if sim > best:
+                best = sim
                 if best >= 1.0:
                     return best
     return best

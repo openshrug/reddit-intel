@@ -25,9 +25,14 @@ def _parse_iso(ts):
         return None
     if isinstance(ts, datetime):
         return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
-    # SQLite stores ISO strings; the trailing 'Z' / '+00:00' depends on writer
+    # SQLite stores ISO strings; the trailing 'Z' / '+00:00' depends on writer.
+    # SQLite's datetime('now') returns naive strings like "2026-04-12 10:30:00"
+    # with no timezone indicator — treat those as UTC.
     s = ts.replace("Z", "+00:00")
-    return datetime.fromisoformat(s)
+    dt = datetime.fromisoformat(s)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 def per_source_relevance(post, comment, severity, now=None):
@@ -55,15 +60,10 @@ def per_source_relevance(post, comment, severity, now=None):
         age_days = max(0.0, age_seconds / 86400.0)
         recency = 0.5 ** (age_days / RELEVANCE_HALF_LIFE_DAYS)
 
-    # Traction — prefer the cached signal_score column, fall back to an
-    # inline approximation when the SIGNAL_SCORING_PLAN job hasn't run yet.
-    signal_score = post["signal_score"] if "signal_score" in post.keys() else None
-    if signal_score is not None:
-        traction = float(signal_score)
-    else:
-        score = post["score"] or 0
-        num_comments = post["num_comments"] or 0
-        traction = log1p(max(0, score)) * 0.5 + log1p(max(0, num_comments)) * 0.8
+    # Traction — computed from raw Reddit engagement stats.
+    score = post["score"] or 0
+    num_comments = post["num_comments"] or 0
+    traction = log1p(max(0, score)) * 0.5 + log1p(max(0, num_comments)) * 0.8
 
     if comment is not None:
         # Comment-rooted painpoints inherit BOTH the post's traction AND the

@@ -245,21 +245,19 @@ def get_uncategorized_id(conn=None):
             conn.close()
 
 
-def merge_painpoints(conn, survivor_id, loser_id, *, lsh_index=None):
-    """Merge two merged painpoints into one (§3.5 step 6 of the plan).
+def merge_painpoints(conn, survivor_id, loser_id):
+    """Merge two merged painpoints into one.
 
     Mechanical contract:
       1. Repoint loser's painpoint_sources rows at the survivor.
       2. survivor.signal_count += loser.signal_count
       3. survivor.first_seen = min(survivor.first_seen, loser.first_seen)
       4. survivor.last_updated = now()
-      5. DELETE the loser row.
-      6. Remove the loser's signature from the Layer B LSH index (caller
-         passes `lsh_index` if it's tracking one).
+      5. DELETE the loser row (cascade removes loser's embedding from
+         painpoint_vec via the row delete).
       7. survivor.category_id is **unchanged** — it keeps whatever category
-         it was in. Deliberate-but-arbitrary; see §3.5 step 7.
-      8. Logged via `logging.info` (NOT to category_events — promoter is
-         logless by design).
+         it was in. Deliberate-but-arbitrary.
+      8. Logged via `logging.info` (NOT to category_events).
 
     Caller is responsible for the merge_lock; this function does not
     open/close its own transaction.
@@ -310,14 +308,11 @@ def merge_painpoints(conn, survivor_id, loser_id, *, lsh_index=None):
         (new_signal, new_first_seen, _now(), survivor_id),
     )
 
-    # 5. Delete the loser.
+    # 5. Delete the loser (and its embedding from painpoint_vec).
+    conn.execute("DELETE FROM painpoint_vec WHERE rowid = ?", (loser_id,))
     conn.execute("DELETE FROM painpoints WHERE id = ?", (loser_id,))
 
-    # 6. LSH index cleanup.
-    if lsh_index is not None:
-        lsh_index.remove(loser_id)
-
-    # 8. Audit log to file (§3.5 step 8 — not to category_events).
+    # 8. Audit log to file (not to category_events).
     log.info(
         "merge_painpoints survivor=%s loser=%s pre_signal_survivor=%s "
         "pre_signal_loser=%s post_signal=%s",
@@ -328,28 +323,21 @@ def merge_painpoints(conn, survivor_id, loser_id, *, lsh_index=None):
     return survivor_id
 
 
-def _pick_canonical_survivor(conn, candidate_ids):
-    """Pick the merge_painpoints survivor: highest signal_count, ties → lowest id."""
-    rows = conn.execute(
-        f"SELECT id, signal_count FROM painpoints "
-        f"WHERE id IN ({','.join('?' * len(candidate_ids))})",
-        list(candidate_ids),
-    ).fetchall()
-    if not rows:
-        return None
-    rows.sort(key=lambda r: (-(r["signal_count"] or 0), r["id"]))
-    return rows[0]["id"]
 
-
-def _create_painpoint_from_pending(conn, pending_id, lsh_index=None):
+def _create_painpoint_from_pending(conn, pending_id, embedding=None, embedder=None):
     """Create a new merged painpoint from a pending painpoint.
 
     Uses the LLM-proposed category from extraction time if it resolved
-    to a real category in the taxonomy; falls back to the Uncategorized
-    sentinel if the LLM didn't propose one or proposed a name that
-    doesn't match any existing category (category_id would be NULL in
-    that case). The category worker can always re-classify later.
+    to a real category in the taxonomy; if embedding-based category
+    assignment is available, uses find_best_category instead. Falls back
+    to the Uncategorized sentinel if no good match.
     """
+    from .embeddings import (
+        find_best_category,
+        store_painpoint_embedding,
+        update_category_embedding,
+    )
+
     pending = conn.execute(
         "SELECT id, title, description, severity, category_id "
         "FROM pending_painpoints WHERE id = ?",
@@ -358,13 +346,18 @@ def _create_painpoint_from_pending(conn, pending_id, lsh_index=None):
     if pending is None:
         raise ValueError(f"pending_painpoint {pending_id} not found")
 
-    category_id = pending["category_id"]
-    if category_id is None:
-        category_id = get_uncategorized_id(conn=conn)
-        log.debug(
-            "pending_painpoint %s has no resolved category — using Uncategorized",
-            pending_id,
-        )
+    # Category assignment: prefer embedding-based if we have an embedding,
+    # else fall back to the LLM-proposed category from extraction time.
+    if embedding is not None:
+        category_id = find_best_category(conn, embedding, embedder=embedder)
+    else:
+        category_id = pending["category_id"]
+        if category_id is None:
+            category_id = get_uncategorized_id(conn=conn)
+            log.debug(
+                "pending_painpoint %s has no resolved category -- using Uncategorized",
+                pending_id,
+            )
 
     now = _now()
     conn.execute(
@@ -382,9 +375,10 @@ def _create_painpoint_from_pending(conn, pending_id, lsh_index=None):
         (new_id, pending_id),
     )
 
-    # Insert into the Layer B LSH index so subsequent painpoints can match it.
-    if lsh_index is not None:
-        lsh_index.insert(new_id, pending["title"], pending["description"] or "")
+    # Store embedding so subsequent painpoints can match against it.
+    if embedding is not None:
+        store_painpoint_embedding(conn, new_id, embedding)
+        update_category_embedding(conn, category_id)
 
     return new_id
 
@@ -406,40 +400,32 @@ def _link_pending_to_painpoint(conn, painpoint_id, pending_id):
         pass
 
 
-def promote_pending(pending_id, *, lsh_index=None, now=None):
+def promote_pending(pending_id, *, embedder=None, now=None):
     """End-to-end promotion of one pending painpoint into the merged table.
 
-    Steps (per §8 of the plan):
-      1. Compute relevance from the pending pp's full source set (§2.3 max).
-         If below MIN_RELEVANCE_TO_PROMOTE, hard-delete the pending row
-         (cascades to pending_painpoint_sources) and return None.
-         Relevance computation is read-only and runs *outside* the lock.
-      2. Acquire the merge lock (BEGIN IMMEDIATE).
-      3. Inside the lock, run the §3.5 decision flow:
-           - Layer A SQL prefilter over the pending's source set
-           - 1 match → link
-           - >1 matches → merge_painpoints across the spanned painpoints,
-             then link to the survivor
-           - 0 matches → Layer B text MinHash → link or
-             create_new_in_uncategorized
-      4. Release the lock.
+    Steps:
+      1. Compute relevance. If below threshold, hard-delete and return None.
+      2. Compute embedding (calls OpenAI API, outside the lock).
+      3. Acquire the merge lock.
+      4. Inside the lock: cosine similarity search against all existing
+         painpoint embeddings. If above MERGE_COSINE_THRESHOLD → link.
+         Otherwise → create new painpoint in the best-matching category.
 
     Returns the painpoints.id the pending pp was attached to, or None if
     the pending row was dropped for low relevance.
-
-    Does NOT touch categories beyond the Uncategorized sentinel. Does NOT
-    emit category events. The category worker handles all taxonomy work.
     """
     from .relevance import compute_pending_relevance, MIN_RELEVANCE_TO_PROMOTE
-    from .similarity import (
-        SIM_THRESHOLD,
-        PainpointLSH,
-        exact_source_lookup,
-        get_pending_sources,
+    from .embeddings import (
+        MERGE_COSINE_THRESHOLD,
+        find_most_similar_painpoint,
     )
     from .locks import merge_lock
 
-    # Step 1 — relevance + drop, outside the lock.
+    if embedder is None:
+        from .embeddings import OpenAIEmbedder
+        embedder = OpenAIEmbedder()
+
+    # Step 1 — relevance check + drop (outside the lock).
     conn = get_db()
     try:
         relevance = compute_pending_relevance(pending_id, conn=conn, now=now)
@@ -456,61 +442,34 @@ def promote_pending(pending_id, *, lsh_index=None, now=None):
     finally:
         conn.close()
 
-    # Steps 2-4 — under the lock.
+    # Step 2 — compute embedding (outside the lock, may call OpenAI).
+    conn = get_db()
+    try:
+        pending = conn.execute(
+            "SELECT title, description FROM pending_painpoints WHERE id = ?",
+            (pending_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    text = f"{pending['title']} {pending['description'] or ''}".strip()
+    embedding = embedder.embed(text)
+
+    # Steps 3-4 — under the lock: cosine similarity → link or create.
     conn = get_db()
     try:
         with merge_lock(conn, timeout=30):
-            # Lazy LSH if caller didn't provide one.
-            if lsh_index is None:
-                lsh_index = PainpointLSH.load_or_build(conn)
+            result = find_most_similar_painpoint(conn, embedding)
+            if result is not None:
+                best_id, cosine_sim = result
+                if cosine_sim >= MERGE_COSINE_THRESHOLD:
+                    _link_pending_to_painpoint(conn, best_id, pending_id)
+                    return best_id
 
-            sources = get_pending_sources(conn, pending_id)
-            sql_matches = exact_source_lookup(conn, sources)
-
-            # ----- Layer A: 1 match → link -----
-            if len(sql_matches) == 1:
-                target = next(iter(sql_matches))
-                _link_pending_to_painpoint(conn, target, pending_id)
-                return target
-
-            # ----- Layer A: multi-match → merge, then link -----
-            if len(sql_matches) > 1:
-                survivor = _pick_canonical_survivor(conn, sql_matches)
-                for other in sql_matches - {survivor}:
-                    merge_painpoints(conn, survivor, other, lsh_index=lsh_index)
-                _link_pending_to_painpoint(conn, survivor, pending_id)
-                return survivor
-
-            # ----- Layer B: text MinHash -----
-            pending = conn.execute(
-                "SELECT title, description FROM pending_painpoints WHERE id = ?",
-                (pending_id,),
-            ).fetchone()
-            text_matches = lsh_index.query(
-                pending["title"], pending["description"] or ""
+            # No match — create new painpoint in the best category
+            new_id = _create_painpoint_from_pending(
+                conn, pending_id, embedding=embedding, embedder=embedder,
             )
-            if not text_matches:
-                new_id = _create_painpoint_from_pending(
-                    conn, pending_id, lsh_index=lsh_index
-                )
-                return new_id
-
-            if len(text_matches) == 1:
-                target = next(iter(text_matches))
-                _link_pending_to_painpoint(conn, target, pending_id)
-                return target
-
-            # Multiple text matches — pick the highest-jaccard one.
-            best_id = None
-            best_jaccard = -1.0
-            for cand in text_matches:
-                j = lsh_index.jaccard(
-                    cand, pending["title"], pending["description"] or ""
-                )
-                if j > best_jaccard:
-                    best_jaccard = j
-                    best_id = cand
-            _link_pending_to_painpoint(conn, best_id, pending_id)
-            return best_id
+            return new_id
     finally:
         conn.close()

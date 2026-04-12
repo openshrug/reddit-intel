@@ -23,6 +23,7 @@ from .category_clustering import (
     category_member_titles,
     inter_category_similarity,
 )
+from .embeddings import FakeEmbedder, update_category_embedding
 from .llm_naming import LLMNamer
 from .relevance import (
     MIN_RELEVANCE_TO_PROMOTE,
@@ -33,18 +34,13 @@ from .relevance import (
 # Tunables — see §10 of the plan.
 MIN_SUB_CLUSTER_SIZE = 5
 SPLIT_RECHECK_DELTA = 10
-MERGE_CATEGORY_THRESHOLD = 0.50
+MERGE_CATEGORY_THRESHOLD = 0.65
 MIN_CATEGORY_RELEVANCE = 1.0
 UNCATEGORIZED_NAME = "Uncategorized"
 
-# Sweep clustering threshold is *lower* than the promoter's SIM_THRESHOLD
-# (0.55) on purpose. Layer B at promote time wants HIGH precision (don't
-# link painpoints that aren't clearly the same). Sweep clustering at sweep
-# time wants HIGH recall (find anything that might be related so we can
-# group them under a category). With the same threshold, anything that
-# would cluster in Uncategorized would already have linked at Layer B, so
-# the sweep would never find a clusterable group. Different operational
-# requirements, different thresholds.
+# Sweep clustering threshold (cosine similarity) is *lower* than the
+# promoter's MERGE_COSINE_THRESHOLD (0.85). Layer B at promote time
+# wants HIGH precision; sweep clustering at sweep time wants HIGH recall.
 SWEEP_CLUSTER_THRESHOLD = 0.40
 
 
@@ -76,9 +72,10 @@ def _uncategorized_id(conn):
     return row["id"] if row else None
 
 
-def propose_uncategorized_events(conn):
-    """Step 1: cluster the Uncategorized bucket via §3.2 text MinHash, yield
-    one `add_category_new` event per cluster of size ≥ MIN_SUB_CLUSTER_SIZE.
+def propose_uncategorized_events(conn, embedder=None):
+    """Step 1: cluster the Uncategorized bucket via embedding cosine sim,
+    yield one `add_category_new` event per cluster of size >=
+    MIN_SUB_CLUSTER_SIZE.
 
     Singletons stay in Uncategorized waiting for siblings to arrive.
     """
@@ -95,7 +92,7 @@ def propose_uncategorized_events(conn):
     if not members:
         return
 
-    clusters = cluster_painpoints(members, threshold=SWEEP_CLUSTER_THRESHOLD)
+    clusters = cluster_painpoints(members, threshold=SWEEP_CLUSTER_THRESHOLD, embedder=embedder)
     for cluster in clusters:
         if len(cluster) < MIN_SUB_CLUSTER_SIZE:
             continue
@@ -118,7 +115,7 @@ def propose_uncategorized_events(conn):
 # ---------------------------------------------------------------------------
 
 
-def propose_split_events(conn):
+def propose_split_events(conn, embedder=None):
     """Step 2: for each non-Uncategorized category whose member count has
     grown by ≥ SPLIT_RECHECK_DELTA since the last check, propose
     `add_category_split` if intra-bucket clustering finds ≥2 sub-clusters
@@ -142,7 +139,7 @@ def propose_split_events(conn):
             continue
 
         members = category_member_titles(conn, cat_id)
-        clusters = cluster_painpoints(members, threshold=SWEEP_CLUSTER_THRESHOLD)
+        clusters = cluster_painpoints(members, threshold=SWEEP_CLUSTER_THRESHOLD, embedder=embedder)
         valid = [c for c in clusters if len(c) >= MIN_SUB_CLUSTER_SIZE]
 
         # Always update the trigger snapshot — even if the split fails, we
@@ -241,10 +238,10 @@ def propose_delete_events(conn):
 # ---------------------------------------------------------------------------
 
 
-def propose_merge_events(conn):
+def propose_merge_events(conn, embedder=None):
     """Step 4: for each pair of sibling categories under the same parent,
-    compute inter-category text similarity (max pairwise member-title
-    MinHash). If above MERGE_CATEGORY_THRESHOLD, propose merge_categories.
+    compute inter-category embedding similarity. If above
+    MERGE_CATEGORY_THRESHOLD, propose merge_categories.
     """
     parents = conn.execute(
         "SELECT DISTINCT parent_id FROM categories WHERE parent_id IS NOT NULL"
@@ -259,7 +256,7 @@ def propose_merge_events(conn):
         for i in range(len(ids)):
             for j in range(i + 1, len(ids)):
                 a, b = ids[i], ids[j]
-                sim = inter_category_similarity(conn, a, b)
+                sim = inter_category_similarity(conn, a, b, embedder=embedder)
                 if sim < MERGE_CATEGORY_THRESHOLD:
                     continue
                 yield CategoryEvent(
@@ -428,6 +425,9 @@ def _apply_add_category_new(conn, event, namer):
             (target_id, _now(), pp_id),
         )
 
+    # Update the new category's embedding from its members
+    update_category_embedding(conn, target_id)
+
     return target_id
 
 
@@ -501,11 +501,45 @@ def _apply_delete_category(conn, event, namer):
 def _apply_merge_categories(conn, event, namer):
     survivor_id = event.payload["survivor_id"]
     loser_id = event.payload["loser_id"]
+
+    # Get names + sample titles for the LLM description
+    survivor_name = conn.execute(
+        "SELECT name FROM categories WHERE id = ?", (survivor_id,)
+    ).fetchone()["name"]
+    loser_name = conn.execute(
+        "SELECT name FROM categories WHERE id = ?", (loser_id,)
+    ).fetchone()["name"]
+    sample_titles = [
+        r["title"] for r in conn.execute(
+            "SELECT title FROM painpoints WHERE category_id IN (?, ?) LIMIT 10",
+            (survivor_id, loser_id),
+        ).fetchall()
+    ]
+
+    # Repoint painpoints and delete the loser
     conn.execute(
         "UPDATE painpoints SET category_id = ?, last_updated = ? WHERE category_id = ?",
         (survivor_id, _now(), loser_id),
     )
+    # Clean up loser's embedding from category_vec
+    try:
+        conn.execute("DELETE FROM category_vec WHERE rowid = ?", (loser_id,))
+    except Exception:
+        pass
     conn.execute("DELETE FROM categories WHERE id = ?", (loser_id,))
+
+    # Ask LLM for an updated description covering the combined scope
+    desc_resp = namer.describe_merged_category(survivor_name, loser_name, sample_titles)
+    new_desc = desc_resp.get("description", "").strip()
+    if new_desc:
+        conn.execute(
+            "UPDATE categories SET description = ? WHERE id = ?",
+            (new_desc, survivor_id),
+        )
+
+    # Update the survivor's embedding with the new description
+    update_category_embedding(conn, survivor_id)
+
     return survivor_id
 
 

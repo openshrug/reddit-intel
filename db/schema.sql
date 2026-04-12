@@ -144,6 +144,4 @@ CREATE TABLE IF NOT EXISTS category_events (
 CREATE INDEX IF NOT EXISTS idx_cat_events_proposed ON category_events(proposed_at);
 CREATE INDEX IF NOT EXISTS idx_cat_events_type ON category_events(event_type);
 
--- §7.7 idx_posts_signal_score is created in db/__init__.py:_apply_migrations()
--- after the signal_score column has been added (we can't reference a column
--- that doesn't exist yet from schema.sql).
+-- (§7.7 signal_score removed in v3 — replaced by embedding-based pipeline.)

@@ -104,6 +104,31 @@ class LLMNamer:
         return json.loads(raw)["subcategories"]
 
 
+    def describe_merged_category(self, survivor_name: str, loser_name: str,
+                                  sample_member_titles: List[str]):
+        """After merging two categories, generate an updated description
+        for the survivor that covers the combined scope. The description
+        should be keyword-rich so embedding similarity works well.
+
+        Returns a dict: {"description": str}.
+        """
+        system = (
+            "You are a taxonomist. Two categories have been merged. Given the surviving "
+            "category name, the absorbed category name, and sample painpoint titles from "
+            "both, write a keyword-rich description (one paragraph, ~30-50 words) for the "
+            "merged category. Include specific technologies, tools, and common complaint "
+            "keywords so embedding similarity can match future painpoints to this category. "
+            "Reply with JSON: {\"description\": \"...\"}."
+        )
+        user = json.dumps({
+            "survivor": survivor_name,
+            "absorbed": loser_name,
+            "sample_titles": sample_member_titles[:10],
+        })
+        raw = self._call(system, user)
+        return json.loads(raw)
+
+
 class FakeNamer:
     """Test double that returns canned names without calling any API.
 
@@ -130,10 +155,13 @@ class FakeNamer:
 
     def name_split_subcategories(self, parent_name, clusters,
                                  existing_taxonomy=None):
-
         if self._split_fn is not None:
             return self._split_fn(parent_name, clusters)
         return [
             {"name": f"{parent_name}/Sub-{i + 1}", "description": f"sub-cluster #{i + 1}"}
             for i, _ in enumerate(clusters)
         ]
+
+    def describe_merged_category(self, survivor_name, loser_name,
+                                 sample_member_titles):
+        return {"description": f"Merged: {survivor_name} + {loser_name}"}

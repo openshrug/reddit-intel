@@ -13,17 +13,11 @@ _MIGRATIONS = [
     # §7.1: cache relevance on the painpoint row
     "ALTER TABLE painpoints ADD COLUMN relevance REAL",
     "ALTER TABLE painpoints ADD COLUMN relevance_updated_at TEXT",
-    # §7.3: cache the MinHash signature
-    "ALTER TABLE painpoints ADD COLUMN minhash_blob BLOB",
+    # §7.3: (removed — minhash_blob replaced by sqlite-vec embeddings)
     # §7.4: split-check trigger discipline
     "ALTER TABLE categories ADD COLUMN last_split_check_at TEXT",
     "ALTER TABLE categories ADD COLUMN painpoint_count_at_last_check INTEGER DEFAULT 0",
-    # §7.7: post-level signal_score (compute logic from SIGNAL_SCORING_PLAN.md)
-    "ALTER TABLE posts ADD COLUMN signal_score REAL",
-    "ALTER TABLE posts ADD COLUMN signal_score_updated_at TEXT",
-    "ALTER TABLE posts ADD COLUMN upvote_count INTEGER",
-    "ALTER TABLE posts ADD COLUMN downvote_count INTEGER",
-    "ALTER TABLE posts ADD COLUMN cluster_size INTEGER DEFAULT 1",
+    # §7.7: (removed — signal_score and derived columns dropped in v3)
 ]
 
 
@@ -37,6 +31,9 @@ def get_db():
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA busy_timeout = 30000")
+    # Load sqlite-vec for vector similarity search
+    from .embeddings import load_sqlite_vec
+    load_sqlite_vec(conn)
     return conn
 
 
@@ -51,19 +48,16 @@ def _apply_migrations(conn):
             if "duplicate column name" not in msg:
                 raise
 
-    # Indexes that depend on columns added by the migrations above must be
-    # created here, not in schema.sql (which can't reference columns that
-    # don't exist yet at script-execution time).
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_posts_signal_score "
-        "ON posts(signal_score DESC)"
-    )
+    # (signal_score index removed in v3 — column no longer exists)
 
 
 def init_db():
     conn = get_db()
     conn.executescript(SCHEMA_FILE.read_text())
     _apply_migrations(conn)
+    # Create sqlite-vec virtual tables for embedding similarity
+    from .embeddings import init_vec_tables
+    init_vec_tables(conn)
     conn.commit()
     conn.close()
 

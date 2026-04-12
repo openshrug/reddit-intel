@@ -8,9 +8,10 @@ This plan describes how rows in `pending_painpoints` get promoted into the
 merged `painpoints` table, how categories evolve in response, and how we
 score painpoint relevance so the system prefers signal over noise.
 
-It composes with the existing `SIGNAL_SCORING_PLAN.md` (post-level
-`signal_score`); painpoint relevance is built **on top of** the post
-signal score, not in place of it.
+Painpoint relevance is computed from raw Reddit engagement stats
+(`posts.score`, `posts.num_comments`) + time decay + LLM severity.
+Similarity is embedding-based (OpenAI `text-embedding-3-small` +
+sqlite-vec cosine similarity).
 
 ---
 
@@ -101,23 +102,12 @@ plus the pending row itself:
 
 | Source | Field | Used for |
 |---|---|---|
-| `posts.signal_score` | post-level Reddit signal (column added by **this plan** in §7.7; compute logic from `SIGNAL_SCORING_PLAN.md`) | base traction |
+| `posts.score` | net upvotes | traction |
+| `posts.num_comments` | comment count | traction |
 | `posts.created_utc` | age | time decay |
-| `posts.score`, `num_comments` | fallback for the inline signal_score approximation when the cached column is NULL | base traction (fallback) |
-| `comments.score` | if the painpoint came from a comment, that comment's traction | base traction boost |
+| `comments.score` | if comment-rooted, the comment's traction | traction boost |
 | `comments.created_utc` | comment age | time decay |
 | `pending_painpoints.severity` (1–10) | LLM's claim about pain intensity | severity multiplier |
-| `pending_painpoints.extracted_at` | freshness of the *extraction*, not the source post | secondary recency |
-
-**Schema dependency.** `posts.signal_score` is added by **this plan**
-(see §7.7) — not by `SIGNAL_SCORING_PLAN.md`. The compute logic for
-filling that column still belongs to the SIGNAL_SCORING_PLAN
-workstream (the engagement × velocity × cluster formula), but the
-column itself lands here so painpoint relevance has somewhere to read
-from. Until the scoring job exists and starts populating the column,
-`signal_score` is `NULL` and `compute_relevance` falls back to a
-lightweight inline formula based on raw `posts.score` and
-`posts.num_comments`. Once scoring runs, the cached column wins.
 
 ### 2.2 Per-source components
 
@@ -135,13 +125,8 @@ def per_source_relevance(post, comment, severity):
     age_days = (now - source_created_utc) / 86400
     recency  = 0.5 ** (age_days / RELEVANCE_HALF_LIFE_DAYS)   # ∈ (0, 1]
 
-    # Traction — read the cached signal_score column. If NULL (the
-    # SIGNAL_SCORING_PLAN job hasn't run yet), fall back to a cheap
-    # inline approximation.
-    if post.signal_score is not None:
-        traction = post.signal_score
-    else:
-        traction = log1p(post.score) * 0.5 + log1p(post.num_comments) * 0.8
+    # Traction — from raw Reddit engagement stats.
+    traction = log1p(post.score) * 0.5 + log1p(post.num_comments) * 0.8
     if comment is not None:
         # boost: comment-rooted painpoints inherit BOTH the post's traction
         # AND the comment's own engagement
@@ -189,8 +174,8 @@ Single-source pendings are the trivial case where the max is over a
 1-element list — same answer as the old single-source formula.
 
 Multiplicative within a source (`traction × recency × severity_mult`)
-for the same reason `signal_score` is multiplicative: these are
-independent amplifiers, a source scores high when it stacks.
+because these are independent amplifiers — a source scores high when
+it stacks.
 
 `relevance` is recomputed lazily — cached on the `painpoints` row in
 the column added by §7.1, with a `relevance_updated_at` timestamp.
@@ -234,260 +219,136 @@ table is otherwise append-only. The drop happens before the row could
 be merged, so the original "pending → merged" evidence chain
 invariant is unaffected.
 
-### 2.5 Why time decay belongs here, not in `signal_score`
-
-By "`signal_score`" I mean the post-level rank defined in
-`SIGNAL_SCORING_PLAN.md` — engagement × velocity × cluster
-multiplier — **not** the raw Reddit `posts.score` upvote column.
-
-`signal_score` deliberately doesn't decay: it ranks posts at scrape
-time and captures "was this post hot when we found it." For the
-painpoint layer we care about "is this pain still relevant *right
-now*," which is a different question. Same underlying Reddit data,
-different decay policy at a different layer.
-
-If we pushed time decay down into `signal_score` itself, we'd break
-post ranking — a high-quality post from three weeks ago would
-constantly demote itself out of view even if its content is still
-exactly what we want to extract pains from. Decay belongs at the
-painpoint layer because that's the layer asking the time-sensitive
-question.
-
 ---
 
 ## 3. Similarity check (does this painpoint already exist?)
 
-Similarity is the hardest part of this whole pipeline. Painpoint text
-is LLM-paraphrased and unreliable, so a single similarity primitive is
-not enough. We use **two layers**, applied at insert time, each
-catching a different kind of duplication. (Earlier drafts had a third
-layer — periodic source-set reconciliation — which turned out to be
-provably dead code under the rules below. The history is in §3.3.)
+Two layers at insert time. Layer A is a SQL source-overlap prefilter
+(unchanged from v1). Layer B uses **OpenAI embeddings
+(`text-embedding-3-small`, 1536 dims) + cosine similarity** stored in
+**sqlite-vec** virtual tables. This replaces the MinHash/LSH approach
+from v1 — embeddings capture semantic similarity, not just literal
+substring overlap, so paraphrased painpoints get correctly merged.
 
-### 3.1 Layer A — exact source check (insert-time, free)
+### 3.1 Embedding cosine similarity (insert-time)
 
-Before doing any hashing, ask SQL the cheapest possible question:
-**"is *any* source in this pending painpoint's source set already
-feeding some merged painpoint?"**
+For the common case where Layer A returns nothing:
 
-A pending painpoint may have multiple sources (per §7.5), so this is
-an `IN` query over its full source set. **Note** that `painpoint_sources`
-itself only stores `(painpoint_id, pending_painpoint_id)` — to find
-which `(post_id, comment_id)` tuples back a merged painpoint we have
-to **join through `pending_painpoint_sources`** (the new junction
-table from §7.5).
+1. **Compute embedding**: call `OpenAIEmbedder.embed(title + " " +
+   description)` → 1536-dim float vector via `text-embedding-3-small`.
+   This happens **outside the merge lock** since it's an API call
+   (~200ms).
+2. **KNN search against `painpoint_vec`**: sqlite-vec virtual table
+   with `distance_metric=cosine`. Returns the closest existing
+   painpoint and its cosine distance.
+3. **Convert to similarity**: `cosine_sim = 1 - cosine_distance`.
+4. **Decision**:
+   - `cosine_sim ≥ MERGE_COSINE_THRESHOLD` (0.82) → link to that
+     painpoint
+   - `cosine_sim < MERGE_COSINE_THRESHOLD` → create a new painpoint
+
+**Category assignment for new painpoints** — when we create a new
+painpoint (no similar existing one found), we assign it to a category
+using the embedding:
 
 ```python
-def exact_source_lookup(pending, conn):
-    sources = list(pending.sources)   # from pending_painpoint_sources
-    if not sources:
-        return set()
-
-    placeholders = ",".join("(?, COALESCE(?, -1))" for _ in sources)
-    params = [v for s in sources for v in (s.post_id, s.comment_id)]
-
-    rows = conn.execute(f"""
-        SELECT DISTINCT ps.painpoint_id
-        FROM painpoint_sources ps
-        JOIN pending_painpoint_sources pps
-          ON pps.pending_painpoint_id = ps.pending_painpoint_id
-        WHERE (pps.post_id, COALESCE(pps.comment_id, -1))
-              IN ({placeholders})
-    """, params).fetchall()
-    return {r["painpoint_id"] for r in rows}
+def find_best_category(conn, embedding):
+    """Traverse the category tree picking children with highest cosine
+    similarity at each level. Start at roots → pick best root → get
+    its children → pick best child. Falls back to Uncategorized if
+    nothing scores above CATEGORY_COSINE_THRESHOLD (0.3)."""
 ```
 
-(The `COALESCE(.., -1)` dance is the standard SQLite workaround for
-`NULL` not equalling `NULL` in tuple comparisons. The sentinel `-1`
-is safe because `comment_id` is a positive autoincrement, so a real
-comment can never collide with the sentinel.)
+This replaces the old "always park in Uncategorized" approach AND the
+LLM-proposed-category-at-extraction-time approach. The embedding
+traversal is strictly better because it considers the actual content
+of existing categories (via their stored embedding vectors), not just
+a static taxonomy label.
 
-**One match returned**: at least one source is shared with an
-existing merged pp, and only one such pp exists. Link the new
-pending row there, skip Layer B.
+### 3.3 Embedding lifecycle
 
-**Multiple matches returned** (only possible with multi-source pending
-painpoints from §7.5 — a single pending pp whose source set spans
-posts that are already cited by *different* merged painpoints): the
-LLM has just told us those merged painpoints are the same pain by
-shared evidence. Pick a canonical survivor (highest `signal_count`,
-ties broken by lowest id), **merge the others into it**
-(`merge_painpoints` action), then link the new pending pp to the
-survivor. See §3.5 for the code.
+Embeddings are stored in two sqlite-vec `vec0` virtual tables:
 
-**Zero matches returned**: fall through to Layer B.
+- **`painpoint_vec`**: one row per merged painpoint, `rowid =
+  painpoint_id`, `embedding float[1536] distance_metric=cosine`.
+  Written at promote time when a new painpoint is created. Deleted
+  when `merge_painpoints` retires the loser.
+- **`category_vec`**: one row per category, `rowid = category_id`,
+  `embedding float[1536] distance_metric=cosine`. Updated as the
+  mean of member painpoint embeddings. Recomputed by
+  `update_category_embedding()` whenever a painpoint is added to or
+  removed from a category.
 
-This is a SQL prefilter, not a hash. It catches the strongest case
-(identical evidence) for free, before we touch MinHash.
+sqlite-vec is loaded on every `get_db()` call via
+`conn.enable_load_extension(True); sqlite_vec.load(conn)`. The vec
+tables are created by `init_vec_tables(conn)` in `init_db()`.
 
-### 3.2 Layer B — text MinHash on title + description (insert-time)
-
-For the much more common case — pending painpoint comes from a *new*
-post that no merged painpoint has touched yet — Layer A returns
-nothing and we fall through to text similarity.
-
-Reuse the MinHash + LSH approach from `SIGNAL_SCORING_PLAN.md`:
-
-- Build MinHash signature over `pending.title + " " + pending.description`
-- Query LSH index of existing `painpoints.title + " " + description`
-- LSH similarity threshold: **`SIM_THRESHOLD = 0.65`** (originally
-  drafted as 0.55; bumped during implementation to widen the gap with
-  the sweep clusterer — see §13)
-
-This is the workhorse for normal merging. Most pending painpoints
-arrive from posts that no other painpoint has touched yet, so Layer A
-misses and Layer B carries the load.
-
-**Multi-source pendings and Layer B.** A multi-source pending pp has
-exactly one `title` and one `description` regardless of how many
-sources it has — the LLM produced one painpoint claim that happens
-to span several posts. So the MinHash signature is unambiguous: one
-input text, one signature, same query as the single-source case.
-Layer B doesn't need to know whether the pending is single- or
-multi-source.
-
-**Limits of Layer B:** if the LLM phrases the same pain wildly
-differently across two posts, MinHash on title shingles will miss the
-match and we'll create two merged painpoints for the same pain. We
-accept this — false splits are easy to clean up later (the next
-`merge_painpoints` event catches them when more evidence accumulates),
-false merges are hard to undo.
-
-### 3.3 (Removed) Layer C — source-set Jaccard reconciliation
-
-Earlier drafts had a third layer: a periodic batch pass over all
-merged painpoints, computing source-set Jaccard between each pair and
-proposing merges for high-overlap pairs. We removed it because it's
-**provably dead code** under the rules of Layers A and B:
-
-1. Layer A is "if any source overlaps with an existing merged pp,
-   handle it now" (link or merge). After Layer A runs, **no two
-   merged painpoints can ever share a source post**. The first
-   pending pp from post #42 routes the post into one merged pp; every
-   subsequent pending pp from post #42 hits Layer A and gets routed to
-   that same merged pp (or merges spanned candidates into one).
-2. If no two merged pps ever share a source, the pairwise source-set
-   Jaccard is always exactly **zero** for any pair. Layer C's whole
-   job was to find pairs with `Jaccard > 0.40`. There are none.
-3. The one path to source overlap I was implicitly worrying about —
-   multi-source pending pps spanning multiple existing merged pps —
-   is now handled at insert time by the multi-match branch of Layer A
-   (§3.5), which merges the spanned painpoints immediately rather
-   than deferring to a later cleanup pass.
-
-Layer C is gone. Section kept as a tombstone so future-us doesn't
-reinvent it without remembering why it was removed.
-
-### 3.4 LSH index lifecycle (Layer B)
-
-The Layer B text-MinHash LSH index is rebuilt incrementally:
-- On promoter startup: rebuild from all `painpoints` rows.
-- After each new `painpoints` insert by the promoter: insert into the
-  live index.
-- After `merge_painpoints` deletes the loser (§3.5 step 6): remove
-  the loser's signature. **This is the only path that deletes a
-  `painpoints` row** — no sweep step in §5 deletes painpoints
-  (sweeps delete *categories*, and the painpoints get re-pointed,
-  not removed).
-- After each painpoint title/description rename (if we add the
-  `rename_painpoint` event from §11): remove old signature, insert
-  new one.
-
-Persist as a pickled `MinHashLSH` next to `trends.db` so we don't pay
-the rebuild cost every cold start.
-
-**Cross-process synchronization (current approach: rebuild in the
-worker).** The promoter holds the canonical in-memory LSH and writes
-new signatures as it inserts painpoints. The category worker is a
-separate process and doesn't share that memory. To avoid stale-LSH
-bugs, **the worker rebuilds its LSH from the `painpoints` table at
-the start of every sweep**, inside the merge lock. This is O(N) per
-sweep but N is small (a few thousand merged painpoints), and the
-rebuild only happens at the worker's cadence (every ~15 minutes,
-not per insert).
-
-The promoter's in-memory LSH is **never** invalidated by the worker
-under the current scope, because the worker doesn't change painpoint
-*titles* — only `category_id`, which isn't part of the MinHash
-signature. If we add `rename_painpoint` (§11), the worker would need
-to bump a version counter that the promoter checks after each lock
-acquisition, and reload from disk if changed. Out of scope for v1.
+**Cross-process sync is free**: both the promoter and the category
+worker read/write the same SQLite file. No pickled index, no
+rebuild-on-sweep, no version counters. sqlite-vec handles it.
 
 ### 3.5 Decision flow at insert time
 
 ```python
-def find_match_for_pending(pending):
-    # Layer A — free SQL prefilter over the pending's full source set
-    sql_matches = exact_source_lookup(pending)   # set of merged_pp ids
+def promote_pending(pending_id, *, embedder=None):
+    # Step 1 — relevance check + drop (outside lock)
+    if relevance < MIN_RELEVANCE_TO_PROMOTE:
+        delete_pending(pending_id)
+        return None
 
-    if len(sql_matches) == 1:
-        # Single existing painpoint already cites a source we share — link.
-        return ("link", sql_matches.pop())
+    # Step 2 — compute embedding (outside lock, calls OpenAI API)
+    text = f"{pending.title} {pending.description or ''}"
+    embedding = embedder.embed(text)
 
-    if len(sql_matches) > 1:
-        # Multi-source pending spans multiple merged pps — by LLM-evidence
-        # transitivity these are the same pain. Pick a survivor and merge
-        # the rest into it, then link the new pending to the survivor.
-        survivor = pick_canonical(sql_matches)   # highest signal_count, ties → lowest id
-        for other in sql_matches - {survivor}:
-            merge_painpoints(survivor, other)    # moves sources, bumps signal_count, retires `other`
-        return ("link", survivor)
+    # Step 3 — acquire lock
+    with merge_lock(conn):
+        # Layer A — exact source SQL prefilter
+        sql_matches = exact_source_lookup(conn, sources)
 
-    # Layer B — text MinHash over title + description
-    text_matches = text_lsh.query(minhash(pending.title + " " + pending.description))
-    if not text_matches:
-        return ("create_new_in_uncategorized", None)
-    if len(text_matches) == 1:
-        return ("link", text_matches[0])
-    # multiple text matches — pick the highest-relevance one
-    return ("link", max(text_matches, key=lambda p: p.relevance))
+        if len(sql_matches) == 1:
+            target = sql_matches.pop()
+            link(conn, target, pending_id)
+            store_painpoint_embedding(conn, target, embedding)  # update
+            return target
+
+        if len(sql_matches) > 1:
+            survivor = pick_canonical(sql_matches)
+            for other in sql_matches - {survivor}:
+                merge_painpoints(conn, survivor, other)
+            link(conn, survivor, pending_id)
+            return survivor
+
+        # Layer B — embedding cosine similarity via painpoint_vec
+        match = find_most_similar_painpoint(conn, embedding)
+        if match and match[1] >= MERGE_COSINE_THRESHOLD:
+            target = match[0]
+            link(conn, target, pending_id)
+            return target
+
+        # No match — create new painpoint in the best category
+        new_id = create_painpoint_from_pending(
+            conn, pending_id, embedding=embedding
+        )
+        return new_id
 ```
 
-The actions:
+**`create_painpoint_from_pending`** uses `find_best_category(conn,
+embedding)` to traverse the category tree by cosine similarity and
+pick the best leaf category. Stores the new painpoint's embedding in
+`painpoint_vec` and updates the target category's embedding in
+`category_vec`.
 
-- **`link`**: existing `link_painpoint_source` + `signal_count` bump
-  in `db/painpoints.py`. Adds every source from the new pending pp's
-  source set to the chosen merged painpoint.
-- **`merge_painpoints(survivor_id, loser_id)`** (new, lives in
-  `db/painpoints.py`): mechanically merges two merged painpoints.
-    1. `UPDATE painpoint_sources SET painpoint_id = survivor_id WHERE painpoint_id = loser_id`
-    2. `survivor.signal_count += loser.signal_count`
-    3. `survivor.first_seen = min(survivor.first_seen, loser.first_seen)`
-    4. `survivor.last_updated = now()`
-    5. `DELETE FROM painpoints WHERE id = loser_id`
-    6. Remove the loser from the Layer B LSH index.
-    7. **Survivor's `category_id` is unchanged** — it keeps whatever
-       category it was already in. This is a deliberate-but-
-       arbitrary choice: when two painpoints in different categories
-       merge, *something* has to give. We pick the survivor itself
-       by `painpoints.signal_count` (highest wins, ties broken by
-       lowest id), and the survivor's category just comes along for
-       the ride as a side effect — we do **not** independently
-       compare the two categories. There is no `category.signal_count`
-       to compare; per-category aggregation lives in §5.1 step 3 as
-       *relevance mass*, computed on demand. If the surviving
-       painpoint ends up in the wrong bucket, the next category-
-       worker sweep will catch it (its category may now look
-       mergeable with the loser's category, which sweep step 4
-       handles at the category level).
-    8. **Not written to `category_events`.** The promoter is logless
-       by design (per §5). For audit/debugging, `merge_painpoints`
-       calls `logging.info(...)` with the survivor and loser ids,
-       both pre-merge signal_counts, and the triggering pending pp
-       id. Plain text log file, not the database. If we ever need
-       structured data here, we add a column or table at that point.
-- **`create_new_in_uncategorized`**: inserts a fresh `painpoints` row
-  with `category_id` pointed at the sentinel `"Uncategorized"`
-  category, and copies the triggering pending pp's source set into
-  `painpoint_sources` (one row per `(post_id, comment_id)` tuple from
-  `pending_painpoint_sources`). **The new merged pp's sources = the
-  triggering pending pp's sources, full stop.** No speculative source
-  scanning, no fuzzy expansion — see §11 for why.
+**`merge_painpoints`** deletes the loser's row from `painpoint_vec`
+(step 5). Survivor's category_id is unchanged (deliberate — §3.5
+step 7 from v1 still applies).
 
-**The promoter never creates or mutates real categories** — that work
-is exclusively the category worker's job (§5). This keeps the
-promoter purely additive: it can run in a tight loop without ever
-touching the taxonomy.
+**`link`** stores/updates the embedding for the existing painpoint
+so the vector stays fresh as more sources accumulate.
+
+**The promoter never creates or mutates categories** — category
+assignment is based on existing category embeddings. The category
+worker (§5) is still responsible for creating, splitting, deleting,
+and merging categories.
 
 ---
 
@@ -613,10 +474,10 @@ performs a full sweep.
 One sweep = four passes, in order, all under the same lock acquisition:
 
 1. **Process Uncategorized.** Cluster painpoints currently sitting in
-   the `Uncategorized` sentinel bucket. **Clustering uses the §3.2
-   text-MinHash primitive**: build a MinHash signature per painpoint
-   over its `title + " " + description`, run LSH at `SIM_THRESHOLD`,
-   take connected components. For each cluster of size ≥
+   the `Uncategorized` sentinel bucket. **Clustering uses embedding
+   cosine similarity** (§3.2): compute or load each painpoint's
+   embedding, build connected components where pairwise cosine sim ≥
+   `SWEEP_CLUSTER_THRESHOLD` (0.40). For each cluster of size ≥
    `MIN_SUB_CLUSTER_SIZE`, propose `add_category(new)` — LLM names
    it, the cluster's painpoints get reassigned. Singletons stay in
    Uncategorized waiting for siblings to arrive.
@@ -634,8 +495,9 @@ One sweep = four passes, in order, all under the same lock acquisition:
    `delete_category` — accept iff no member painpoint has individual
    relevance > `MIN_RELEVANCE_TO_PROMOTE`.
 4. **Merge duplicate sibling categories.** For each pair of sibling
-   categories, compute text-MinHash similarity over member painpoint
-   titles. If similarity > `MERGE_CATEGORY_THRESHOLD`, propose
+   categories, compute cosine similarity between their category
+   embedding vectors (stored in `category_vec`). If similarity >
+   `MERGE_CATEGORY_THRESHOLD`, propose
    `merge_categories`. (This is purely a category-level concern;
    painpoint-level merges happen at insert time via Layer A's
    multi-match branch in §3.5, not in this sweep.)
@@ -650,7 +512,7 @@ A single sweep can produce many events.
 | `add_category` (new) | step 1 (Uncategorized cluster ≥ `MIN_SUB_CLUSTER_SIZE`) | LLM produces a name + description + parent_id; accept unless the LLM refuses or the new name collides with an existing category | insert a row in `categories`, reassign the cluster's painpoints to it |
 | `add_category` (split) | step 2 (category grew enough to re-check) | intra-bucket clustering finds ≥2 distinct sub-clusters, each with size ≥ `MIN_SUB_CLUSTER_SIZE`; LLM names them | insert N new sub-categories under C's parent, reassign painpoints to their cluster's sub-category, retire C |
 | `delete_category` | step 3 (mass < `MIN_CATEGORY_RELEVANCE`) | no individual painpoint in C has `relevance > MIN_RELEVANCE_TO_PROMOTE` | delete C, relink any surviving members to C's parent |
-| `merge_categories` | step 4 (sibling similarity scan) | text MinHash similarity over member painpoint titles `> MERGE_CATEGORY_THRESHOLD` | delete one, repoint its painpoints at the other; LLM optionally renames the survivor |
+| `merge_categories` | step 4 (sibling similarity scan) | category embedding cosine similarity `> MERGE_CATEGORY_THRESHOLD` | delete one, repoint its painpoints at the other; LLM optionally renames the survivor |
 
 There is no `noop` event anymore — noop was an artifact of the old
 "emit one event per painpoint" model. In the batch worker model,
@@ -767,7 +629,7 @@ post-mutation state. Looking at the actual tests in §5.2:
 | `add_category(new)` | LLM names it, accept unless name collides | No — clustering + LLM call + name lookup |
 | `add_category(split)` | ≥2 sub-clusters of size ≥ `MIN_SUB_CLUSTER_SIZE` | No — clustering happens before any DB mutation |
 | `delete_category` | No member has `relevance > MIN_RELEVANCE_TO_PROMOTE` | No — read members before deleting |
-| `merge_categories` | Text MinHash similarity over members > threshold | No — pure read |
+| `merge_categories` | Category embedding cosine similarity > threshold | No — pure read |
 
 Every test is **pre-mutation**, so the test goes first and the
 savepoint exists only to protect against partial failures *during*
@@ -852,10 +714,7 @@ CREATE TABLE IF NOT EXISTS category_events (
 CREATE INDEX IF NOT EXISTS idx_cat_events_proposed ON category_events(proposed_at);
 CREATE INDEX IF NOT EXISTS idx_cat_events_type ON category_events(event_type);
 
--- 7.3 cache the MinHash signature so we don't recompute on every read
-ALTER TABLE painpoints ADD COLUMN minhash_blob BLOB;
-
--- 7.4 split-check trigger discipline (§5.1)
+-- 7.3 split-check trigger discipline (§5.1)
 ALTER TABLE categories ADD COLUMN last_split_check_at TEXT;
 ALTER TABLE categories ADD COLUMN painpoint_count_at_last_check INTEGER DEFAULT 0;
 
@@ -907,26 +766,9 @@ VALUES ('Uncategorized', NULL,
         'Sentinel bucket for painpoints awaiting category-worker processing.',
         strftime('%Y-%m-%dT%H:%M:%fZ','now'));
 
--- 7.7 Post-level signal score — schema lands here so painpoint
--- relevance (§2.2) has a column to read. The compute logic for
--- filling these columns still belongs to SIGNAL_SCORING_PLAN.md;
--- until that job runs they stay NULL and §2.2 falls back to an
--- inline approximation.
-ALTER TABLE posts ADD COLUMN signal_score REAL;
-ALTER TABLE posts ADD COLUMN signal_score_updated_at TEXT;
-
--- Persisted alongside per SIGNAL_SCORING_PLAN.md "for the LLM
--- reasoning step" — derived from score + upvote_ratio at scrape
--- time. The LLM extract pass reads them; ranking does NOT.
-ALTER TABLE posts ADD COLUMN upvote_count INTEGER;
-ALTER TABLE posts ADD COLUMN downvote_count INTEGER;
-
--- Cluster size from MinHash near-duplicate merging at scrape time.
--- Used by signal_score's cluster_multiplier and persisted so we can
--- audit which posts collapsed together.
-ALTER TABLE posts ADD COLUMN cluster_size INTEGER DEFAULT 1;
-
-CREATE INDEX IF NOT EXISTS idx_posts_signal_score ON posts(signal_score DESC);
+-- (§7.7 removed — signal_score, upvote_count, downvote_count,
+-- cluster_size columns dropped. Relevance uses raw posts.score
+-- and posts.num_comments directly.)
 ```
 
 Pure ALTER + CREATE — no destructive migration needed since the new
@@ -940,9 +782,10 @@ columns are nullable.
 |---|---|
 | `db/locks.py` | `merge_lock()` context manager (§4) |
 | `db/relevance.py` | `compute_relevance(painpoint_or_pending)` per §2.3 (object form, not id), `per_source_relevance` helper, batch recompute job that walks `painpoint_sources → pending_painpoint_sources` to find every contributing `(post, comment)` tuple and takes the max |
-| `db/similarity.py` | the two layers from §3: exact-source SQL prefilter (Layer A, including the multi-match `merge_painpoints` branch) and text MinHash + LSH lifecycle (Layer B) |
+| `db/similarity.py` | Layer A only: exact-source SQL prefilter (`get_pending_sources`, `exact_source_lookup`). Layer B moved to `db/embeddings.py`. |
+| `db/embeddings.py` | OpenAI embedding calls (`OpenAIEmbedder`, `FakeEmbedder` test double), sqlite-vec `vec0` table management (`painpoint_vec`, `category_vec`), `find_most_similar_painpoint`, `find_best_category` tree traversal, `update_category_embedding` (mean of members). |
 | `db/category_events.py` | event types, `apply_event`, per-event acceptance tests (§5.2), `category_events` log writes — called by category_worker |
-| `db/category_clustering.py` | intra-bucket clustering for `add_category(split)` and inter-category similarity for `merge_categories` — both reuse §3 primitives |
+| `db/category_clustering.py` | intra-bucket clustering for `add_category(split)` and inter-category similarity for `merge_categories` — uses embedding cosine similarity, not MinHash |
 | `db/llm_naming.py` | thin wrapper around `llm.py` for "name this new category" / "name these N sub-clusters" prompts |
 | `promoter.py` (top-level) | the painpoint promoter loop: pull pending → relevance → drop or continue → similarity → link/insert. **Never touches categories.** |
 | `category_worker.py` (top-level) | the sweep worker (§5.1, §5.4): periodically acquires the merge lock and runs a four-pass taxonomy sweep. Operates exclusively at the category level — painpoint-level merging happens at insert time per §3.5, not in the sweep. |
@@ -1095,8 +938,10 @@ keep it out of the existing config):
 ```json
 {
   "painpoint_ingest": {
-    "sim_threshold": 0.65,
+    "merge_cosine_threshold": 0.82,
+    "category_cosine_threshold": 0.3,
     "sweep_cluster_threshold": 0.40,
+    "embedding_model": "text-embedding-3-small",
     "min_sub_cluster_size": 5,
     "split_recheck_delta": 10,
     "merge_category_threshold": 0.50,
@@ -1113,8 +958,10 @@ What each one controls:
 
 | Tunable | Section | Meaning |
 |---|---|---|
-| `sim_threshold` | §3.2 | Promote-time LSH threshold for Layer B text MinHash. Two painpoint titles are "near-duplicate" iff Jaccard ≥ this value. Lower → more aggressive merging at promote time. |
-| `sweep_cluster_threshold` | §5.1 step 1, step 2 | Sweep-time clustering threshold, intentionally lower than `sim_threshold`. The sweep wants high recall (find anything related), while promote wants high precision (only link clearly-equivalent things). The 0.40–0.65 gap is the window where related-but-not-equivalent painpoints land in Uncategorized as singletons and get clustered later. |
+| `merge_cosine_threshold` | §3.2 | Promote-time threshold for Layer B embedding cosine similarity. If the most similar existing painpoint has `cosine_sim ≥ 0.82`, link to it. Lower → more aggressive merging. |
+| `category_cosine_threshold` | §3.2 | Minimum cosine similarity between a new painpoint's embedding and a category embedding for the tree traversal to consider that category a match. Below this → Uncategorized. |
+| `sweep_cluster_threshold` | §5.1 step 1, step 2 | Sweep-time clustering threshold (cosine sim). Intentionally lower than `merge_cosine_threshold` — the sweep wants high recall (find anything related), promote wants high precision. |
+| `embedding_model` | §3.2 | OpenAI embedding model. Default `text-embedding-3-small` (1536 dims, ~$0.02/1M tokens). |
 | `min_sub_cluster_size` | §5.1 step 2 | When the worker considers splitting a category, the resulting sub-clusters must each have at least this many painpoints to be accepted. Smaller → more eager splitting. |
 | `split_recheck_delta` | §5.1 step 2 | A category only gets a fresh split-check after it has grown by this many painpoints since the last check. Throttles the O(N²) clustering work. |
 | `merge_category_threshold` | §5.1 step 4 | Two sibling categories with member-title MinHash similarity above this value are proposed for merging. |
@@ -1169,13 +1016,13 @@ the subreddits you target. Easy to tune later.
   practice, (b) it interacts with `painpoints.title` exact-equality
   dedup elsewhere in `db/painpoints.py` and would need a name-
   collision branch we'd rather only build if needed.
-- **Cross-language painpoints.** MinHash on character shingles is
-  language-blind enough for English Reddit; if we add non-English
-  subreddits we'll need to revisit normalization.
+- **Cross-language painpoints.** OpenAI's embedding model handles
+  English well; non-English subreddits would need testing.
 - **Backfilling relevance for existing painpoints.** Whatever's in
   `painpoints` today gets relevance computed lazily on first read.
-- **Vectors / embeddings.** Deliberately avoided — keeps the system
-  zero-API-cost like `SIGNAL_SCORING_PLAN.md` already is.
+- **Vectors / embeddings.** Now implemented — uses OpenAI
+  `text-embedding-3-small` for similarity and sqlite-vec for storage.
+  Cost is ~$0.02/1M tokens (~$0.001 per 1000 painpoints).
 
 ---
 
@@ -1294,7 +1141,7 @@ but worth recording so the doc doesn't drift from the code:
 8. **Tunables are hardcoded module constants for v1.** The §10 config
    table describes a `painpoint_ingest` block in `config.json`, but the
    implementation hardcodes them as module-level constants in
-   `db/relevance.py`, `db/similarity.py`, and `db/category_events.py`
+   `db/relevance.py`, `db/embeddings.py`, and `db/category_events.py`
    with comments noting "lift to config later." Fine for v1; loading
    from JSON adds wiring without changing behaviour.
 9. **Promoter uses LLM-proposed category from extraction time.** The
@@ -1316,21 +1163,45 @@ but worth recording so the doc doesn't drift from the code:
     module removed in `ed4986f`) was replaced with
     `from db.queries import run_sql`. Without this, every LLM naming
     call failed with `No module named 'database'`.
+12. **MinHash/LSH replaced with OpenAI embeddings + sqlite-vec.**
+    All character-shingle MinHash similarity (Layer B) replaced with
+    `text-embedding-3-small` (1536 dims) + cosine similarity stored
+    in sqlite-vec `vec0` virtual tables (`painpoint_vec`,
+    `category_vec`). `datasketch` dependency removed, `sqlite-vec` +
+    `numpy` added. See §3.2–§3.4 for the new design. Key thresholds:
+    `MERGE_COSINE_THRESHOLD = 0.82` (promote-time precision),
+    `SWEEP_CLUSTER_THRESHOLD = 0.40` (sweep-time recall),
+    `CATEGORY_COSINE_THRESHOLD = 0.3` (tree traversal).
+13. **Layer A (exact source SQL prefilter) removed.** The source-
+    overlap check was an optimization that added complexity for
+    marginal value — embedding cosine sim catches the same cases
+    semantically. `db/similarity.py` deleted, `merge_painpoints`
+    multi-match trigger removed from `promote_pending`. The
+    `merge_painpoints` function itself remains as a utility in
+    `db/painpoints.py`.
+14. **`signal_score` columns removed.** The `posts.signal_score`,
+    `signal_score_updated_at`, `upvote_count`, `downvote_count`,
+    `cluster_size` columns and their index were removed from
+    migrations. The relevance formula always uses the inline
+    `log1p(score)*0.5 + log1p(num_comments)*0.8` approximation.
+    The `SIGNAL_SCORING_PLAN.md` document remains in `docs/` as
+    a reference but nothing in the pipeline depends on it.
+15. **`describe_merged_category` added to LLM naming.** After
+    `merge_categories`, the LLM generates a keyword-rich description
+    for the surviving category so its embedding stays relevant for
+    future similarity matches.
 
 ### Test coverage map
 
 | Plan section | Test class(es) |
 |---|---|
-| §2.2 per-source relevance | `TestRelevance` (4 tests) |
+| §2.2 per-source relevance | `TestRelevance` (3 tests) |
 | §2.3 max aggregation | `TestRelevanceMaxAggregation` (2 tests) |
 | §2.4 drop step | `TestPromoteDropsLowRelevance` (1 test) |
-| §3.1 Layer A | `TestSimilarityLayerA` (3 tests) |
-| §3.2 Layer B | `TestSimilarityLayerB` (3 tests) |
-| §3.5 multi-match merge | `TestLayerAMultiMatchMerge` (1 test) |
-| §3.5 `merge_painpoints` invariants | `TestMergePainpointsInvariants` (4 tests) |
+| §3.2 embedding cosine similarity | `TestSimilarityLayerB` (2 tests) |
 | §3.5 source inheritance | `TestNewPainpointInheritsPendingSources` (1 test) |
 | §4 merge lock | `TestMergeLock` (1 test), `TestSweepLockSerialisesPromoter` (1 test) |
-| §3.5 promoter contract | `TestPromoterDoesNotTouchCategories` (1 test) |
+| §3.5 promoter category wiring | `TestPromoterCategoryAssignment` (4 tests) |
 | §5.1 step 1 (Uncategorized) | `TestSweepProcessesUncategorized` (2 tests) |
 | §5.1 step 2 (split) | `TestSplitTest` (1 test), `TestSplitTriggerDiscipline` (2 tests) |
 | §5.1 step 3 (delete) | `TestDeleteTest` (2 tests) |
@@ -1339,10 +1210,8 @@ but worth recording so the doc doesn't drift from the code:
 | §5.3 audit log | `TestCategoryEventLog` (1 test) |
 | End-to-end | `TestEndToEndSmoke` (1 test) |
 | **Stress / deadlock freedom** | `TestStressNoDeadlocks` (4 tests) |
-| **Realistic synthetic workflow** | `TestRealisticWorkflow` (3 tests) |
-
+| **Realistic synthetic workflow** | `TestRealisticWorkflow` (2 tests) |
 | **Full lifecycle (decay + sweep)** | `TestFullLifecycleWithDecay` (2 tests — one with asserts, one for human inspection) |
-| §3.5 promoter category wiring | `TestPromoterCategoryAssignment` (4 tests — valid category, unknown category, no category, promoter never creates categories) |
 | **Live LLM integration** | `tests/test_live_llm_naming.py` (1 test, gated behind `OPENAI_API_KEY`, calls real API) |
 
 Stress tests assert three database invariants after every concurrent
