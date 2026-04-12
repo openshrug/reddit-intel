@@ -154,22 +154,36 @@ def _programmatic_checks(painpoints):
 # ============================================================
 
 JUDGE_INSTRUCTIONS = """\
-You are an extraction quality judge. You will receive a Reddit post with its \
-comments, followed by a list of painpoints that were extracted from it by an \
-automated system. Your job is to evaluate each extracted painpoint AND identify \
-any painpoints the system missed.
+You are an extraction quality judge for developer-tool product research. \
+You will receive a Reddit post with its comments, followed by a list of \
+painpoints that were extracted from it by an automated system.
+
+The extractor's goal is to find painpoints that someone could build a \
+developer product around (an app, tool, extension, API, or service). \
+Painpoints should be ACTIONABLE, SPECIFIC, and TECHNICAL — related to \
+software development, tooling, infrastructure, or developer workflow.
+
+The extractor should skip: pure opinions/memes/jokes, pricing complaints \
+(unless they reveal a feature gap), social/career anxieties, and platform \
+politics or company drama.
+
+Your job is to evaluate each extracted painpoint AND identify any \
+productizable painpoints the system missed.
 
 For each extracted painpoint, score:
-- validity (1-5): Is this a real user painpoint? 1 = hallucinated/noise, \
-5 = clearly expressed pain.
+- validity (1-5): Is this a real, productizable painpoint? \
+1 = hallucinated/noise/not actionable, 5 = clearly expressed pain that \
+someone could build a product to solve.
 - title_quality (1-5): Does the title accurately and concisely capture the pain? \
 1 = misleading, 5 = excellent summary.
 - severity_accuracy (1-5): Is the assigned severity reasonable? \
 1 = way off, 5 = well-calibrated.
 - notes: Brief explanation only if any score is <= 3.
 
-Also list any concrete painpoints the extractor missed (missed_painpoints). \
-Only list genuine, specific pains — not vague sentiments."""
+Also list any productizable painpoints the extractor missed \
+(missed_painpoints). Only list genuine, specific, actionable pains that \
+someone could build a developer tool to solve — not vague sentiments or \
+non-technical complaints."""
 
 
 def _format_judge_input(post_dict, comments, extracted_pps):

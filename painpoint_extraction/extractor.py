@@ -21,8 +21,8 @@ log = logging.getLogger(__name__)
 # --- Tunables ---
 MODEL = "gpt-5-nano"
 REASONING_EFFORT = "low"
-BATCH_TOKEN_BUDGET = 5_000
-LLM_CONCURRENCY = 100
+BATCH_TOKEN_BUDGET = 2_000
+LLM_CONCURRENCY = 40
 
 
 # --- Structured output schema ---
@@ -31,7 +31,7 @@ class ExtractedPainpoint(BaseModel):
     title: str = Field(description="Concise name revealing the essence of the pain")
     description: str = Field(description="1-2 sentence explanation of the pain")
     severity: int = Field(ge=1, le=10, description="1 = minor annoyance, 10 = blocking/critical, 5 - moderate annoyance, but not blocking")
-    quoted_text: str = Field(description="Verbatim substring from the source post or comment")
+    quoted_text: str = Field(description="Brief key phrase (under 5 words) copied verbatim from the source post or comment that anchors this painpoint")
     category_name: str = Field(description="Must match a category from the taxonomy, or 'Uncategorized'")
     post_id: int = Field(description="The [Post N] ID from the input")
     comment_id: int | None = Field(default=None, description="The [Comment N] ID, or null if from the post body")
@@ -65,7 +65,8 @@ Skip painpoints that are:
 Rules:
 - A single post/comment may contain zero, one, or many painpoints.
 - Different comments on the same post may yield different painpoints.
-- quoted_text must be a verbatim substring from the source text.
+- quoted_text must be a brief key phrase (under 5 words) copied verbatim \
+from the source — pick the most distinctive words that anchor this painpoint.
 - If no category fits well, use "Uncategorized".
 
 ## Category taxonomy
@@ -105,31 +106,12 @@ async def extract_painpoints(post_ids, *, batch_token_budget=BATCH_TOKEN_BUDGET)
     sem = asyncio.Semaphore(LLM_CONCURRENCY)
     counter = TokenCounter()
 
-    async def _process_batch(batch_idx, batch):
-        async with sem:
-            batch_text = _format_batch(batch)
-            log.info("extract: batch %d/%d (%d posts)",
-                     batch_idx + 1, len(batches), len(batch))
-            try:
-                result = await asyncio.to_thread(
-                    llm_call, client, instructions, batch_text,
-                    response_model=ExtractionResult, model=MODEL,
-                    max_tokens=None, reasoning_effort=REASONING_EFFORT,
-                    token_counter=counter,
-                )
-            except Exception as exc:
-                log.warning("extract: batch %d/%d failed: %s",
-                            batch_idx + 1, len(batches), exc)
-                return []
-            log.info("extract: batch %d/%d -> %d painpoints",
-                     batch_idx + 1, len(batches), len(result.painpoints))
-            return result.painpoints
-
     batch_results = await asyncio.gather(
-        *(_process_batch(i, b) for i, b in enumerate(batches))
+        *(_process_batch(i, len(batches), b, client, instructions, sem, counter)
+          for i, b in enumerate(batches))
     )
 
-    items = [pp.model_dump() for pps in batch_results for pp in pps]
+    items = [item for batch_items in batch_results for item in batch_items]
 
     usage = counter.as_dict()
     log.info("extract: tokens — input: %d, output: %d (reasoning: %d, text: %d)",
@@ -143,6 +125,82 @@ async def extract_painpoints(post_ids, *, batch_token_budget=BATCH_TOKEN_BUDGET)
     ids = save_pending_painpoints_batch(items)
     log.info("extract: saved %d pending painpoints", len(ids))
     return ids, usage
+
+
+# ============================================================
+# Per-batch processing
+# ============================================================
+
+async def _process_batch(batch_idx, total, batch, client, instructions, sem, counter):
+    """LLM extract -> fix attribution -> return corrected painpoint dicts."""
+    async with sem:
+        batch_text = _format_batch(batch)
+        log.info("extract: batch %d/%d (%d posts)",
+                 batch_idx + 1, total, len(batch))
+        try:
+            result = await asyncio.to_thread(
+                llm_call, client, instructions, batch_text,
+                response_model=ExtractionResult, model=MODEL,
+                max_tokens=None, reasoning_effort=REASONING_EFFORT,
+                token_counter=counter,
+            )
+        except Exception as exc:
+            log.warning("extract: batch %d/%d failed: %s",
+                        batch_idx + 1, total, exc)
+            return []
+
+        items = [pp.model_dump() for pp in result.painpoints]
+        fixed = _fix_attribution(items, batch)
+        log.info("extract: batch %d/%d -> %d painpoints (%d attribution fixes)",
+                 batch_idx + 1, total, len(items), fixed)
+        return items
+
+
+def _fix_attribution(items, batch):
+    """Fix comment_id attribution by searching quoted_text in source material.
+
+    Operates in-place on the items list. Returns count of fixes applied.
+    """
+    source_lookup = {}
+    for post, comments in batch:
+        post_text = (
+            (post.get("title") or "") + " " + (post.get("selftext") or "")
+        ).lower()
+        comment_entries = [
+            (c["id"], (c.get("body") or "").lower()) for c in comments
+        ]
+        source_lookup[post["id"]] = (post_text, comment_entries)
+
+    fixed = 0
+    for item in items:
+        quote = (item.get("quoted_text") or "").lower().strip()
+        if not quote:
+            continue
+
+        sources = source_lookup.get(item["post_id"])
+        if not sources:
+            continue
+
+        post_text, comment_entries = sources
+
+        matches = []
+        if quote in post_text:
+            matches.append(None)  # None = post body
+        for cid, cbody in comment_entries:
+            if quote in cbody:
+                matches.append(cid)
+
+        if not matches:
+            continue
+
+        current = item.get("comment_id")
+        if current in matches:
+            continue
+
+        item["comment_id"] = matches[0]
+        fixed += 1
+
+    return fixed
 
 
 # ============================================================

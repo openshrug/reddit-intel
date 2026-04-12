@@ -4,11 +4,15 @@ Used by both ingest.py and ideas.py.
 """
 
 import json
+import logging
 import os
 import textwrap
 import threading
+import time
 
 from openai import OpenAI
+
+log = logging.getLogger(__name__)
 
 from db.queries import run_sql
 
@@ -76,8 +80,9 @@ class TokenCounter:
 
 def llm_call(client, instructions, input, *, max_tokens=4000,
              json_mode=True, response_model=None, model="gpt-5-nano",
-             reasoning_effort=None, token_counter=None):
-    """Call OpenAI Responses API with debug logging.
+             reasoning_effort=None, token_counter=None, retries=2,
+             backoff_base=4):
+    """Call OpenAI Responses API with debug logging and exponential backoff.
 
     Args:
         client: OpenAI client instance.
@@ -94,6 +99,10 @@ def llm_call(client, instructions, input, *, max_tokens=4000,
         model: Model name.
         reasoning_effort: Optional reasoning effort level for reasoning
             models (``"low"``, ``"medium"``, ``"high"``, etc.).
+        token_counter: Optional ``TokenCounter`` to accumulate usage.
+        retries: Number of retry attempts on transient errors (default 2).
+        backoff_base: Base delay in seconds for exponential backoff
+            (default 4 → delays of 4s, 8s).
 
     Returns:
         ``str`` when *response_model* is None, otherwise a Pydantic model
@@ -112,53 +121,68 @@ def llm_call(client, instructions, input, *, max_tokens=4000,
             debug_msg("system", instructions)
             debug_msg("user", input)
 
-    if response_model is not None:
-        parse_kwargs = dict(
-            model=model,
-            instructions=instructions,
-            input=input,
-            text_format=response_model,
-        )
+    def _do_call():
+        if response_model is not None:
+            parse_kwargs = dict(
+                model=model,
+                instructions=instructions,
+                input=input,
+                text_format=response_model,
+            )
+            if max_tokens is not None:
+                parse_kwargs["max_output_tokens"] = max_tokens
+            if reasoning_effort is not None:
+                parse_kwargs["reasoning"] = {"effort": reasoning_effort}
+            resp = client.responses.parse(**parse_kwargs)
+            if token_counter is not None:
+                token_counter.add(resp.usage)
+            if resp.output_parsed is None:
+                refusal = getattr(resp, "refusal", None)
+                raw = resp.output_text if hasattr(resp, "output_text") else str(resp)
+                raise RuntimeError(
+                    f"Structured output returned None"
+                    f"{f' (refusal: {refusal})' if refusal else ''}"
+                    f" — raw output: {raw[:500]}"
+                )
+            if is_debug():
+                debug_msg("assistant", str(resp.output_parsed))
+            return resp.output_parsed
+
+        kwargs = {
+            "model": model,
+            "instructions": instructions,
+            "input": input,
+        }
         if max_tokens is not None:
-            parse_kwargs["max_output_tokens"] = max_tokens
+            kwargs["max_output_tokens"] = max_tokens
         if reasoning_effort is not None:
-            parse_kwargs["reasoning"] = {"effort": reasoning_effort}
-        resp = client.responses.parse(**parse_kwargs)
+            kwargs["reasoning"] = {"effort": reasoning_effort}
+        if json_mode:
+            kwargs["text"] = {"format": {"type": "json_object"}}
+
+        resp = client.responses.create(**kwargs)
         if token_counter is not None:
             token_counter.add(resp.usage)
-        if resp.output_parsed is None:
-            refusal = getattr(resp, "refusal", None)
-            raw = resp.output_text if hasattr(resp, "output_text") else str(resp)
-            raise RuntimeError(
-                f"Structured output returned None"
-                f"{f' (refusal: {refusal})' if refusal else ''}"
-                f" — raw output: {raw[:500]}"
-            )
+        content = resp.output_text
+
         if is_debug():
-            debug_msg("assistant", str(resp.output_parsed))
-        return resp.output_parsed
+            debug_msg("assistant", content)
 
-    kwargs = {
-        "model": model,
-        "instructions": instructions,
-        "input": input,
-    }
-    if max_tokens is not None:
-        kwargs["max_output_tokens"] = max_tokens
-    if reasoning_effort is not None:
-        kwargs["reasoning"] = {"effort": reasoning_effort}
-    if json_mode:
-        kwargs["text"] = {"format": {"type": "json_object"}}
+        return content
 
-    resp = client.responses.create(**kwargs)
-    if token_counter is not None:
-        token_counter.add(resp.usage)
-    content = resp.output_text
-
-    if is_debug():
-        debug_msg("assistant", content)
-
-    return content
+    last_exc = None
+    for attempt in range(1 + retries):
+        try:
+            return _do_call()
+        except Exception as exc:
+            last_exc = exc
+            if attempt >= retries:
+                raise
+            delay = backoff_base * (2 ** attempt)
+            log.warning("llm_call attempt %d/%d failed (%s), retrying in %ds",
+                        attempt + 1, 1 + retries, exc, delay)
+            time.sleep(delay)
+    raise last_exc  # unreachable, but satisfies type checkers
 
 
 def get_client():
