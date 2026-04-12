@@ -11,11 +11,14 @@ import httpx
 import pytest
 
 from reddit_scraper import (
+    BACKOFF_BASE,
+    MAX_RETRIES,
     POST_FIELDS,
     COMMENT_FIELDS,
     _dedup_and_rank,
     _parse_comment,
     _parse_post,
+    _request,
     scrape_comments,
     scrape_subreddit,
     scrape_subreddit_full,
@@ -83,6 +86,11 @@ def _comments_response(comments):
 
 def _noop_sem():
     return asyncio.Semaphore(100)
+
+
+async def _fake_sleep(_seconds):
+    """Drop-in for asyncio.sleep that returns immediately."""
+    pass
 
 
 # ===================================================================
@@ -221,7 +229,8 @@ class TestScrapeSubreddit:
                 )
 
     @pytest.mark.asyncio
-    async def test_429_retry(self):
+    async def test_429_retry(self, monkeypatch):
+        monkeypatch.setattr("reddit_scraper.asyncio.sleep", _fake_sleep)
         call_count = 0
 
         def handler(req):
@@ -419,6 +428,44 @@ class TestScrapeSubredditFull:
         )
 
     @pytest.mark.asyncio
+    async def test_404_subreddit_returns_empty(self, monkeypatch):
+        monkeypatch.setattr(
+            "reddit_scraper._oauth_headers",
+            lambda: {"Authorization": "Bearer fake"},
+        )
+        transport = httpx.MockTransport(
+            lambda req: httpx.Response(404)
+        )
+        posts = await scrape_subreddit_full("nosuchsub", _transport=transport)
+        assert posts == []
+
+    @pytest.mark.asyncio
+    async def test_partial_window_failure(self, monkeypatch):
+        """One window fails, others succeed — still returns posts."""
+        monkeypatch.setattr(
+            "reddit_scraper._oauth_headers",
+            lambda: {"Authorization": "Bearer fake"},
+        )
+        monkeypatch.setattr("reddit_scraper.asyncio.sleep", _fake_sleep)
+        call_count = 0
+
+        def handler(req):
+            nonlocal call_count
+            call_count += 1
+            url = str(req.url)
+            if "t=week" in url:
+                return httpx.Response(500)
+            return httpx.Response(200, json=_listing_response(
+                [_fake_post("t3_1", score=99)]
+            ))
+
+        transport = httpx.MockTransport(handler)
+        posts = await scrape_subreddit_full(
+            "test", comment_budget=0, _transport=transport,
+        )
+        assert len(posts) >= 1
+
+    @pytest.mark.asyncio
     async def test_empty_subreddit(self, monkeypatch):
         monkeypatch.setattr(
             "reddit_scraper._oauth_headers",
@@ -429,5 +476,172 @@ class TestScrapeSubredditFull:
         )
         posts = await scrape_subreddit_full("empty", _transport=transport)
         assert posts == []
+
+
+# ===================================================================
+# _request retry logic
+# ===================================================================
+
+class TestRequestRetry:
+    @pytest.mark.asyncio
+    async def test_success_no_retry(self):
+        call_count = 0
+
+        def handler(req):
+            nonlocal call_count
+            call_count += 1
+            return httpx.Response(200, json={"ok": True})
+
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(transport=transport) as client:
+            resp = await _request(client, _noop_sem(), "GET", "https://example.com")
+        assert resp.status_code == 200
+        assert call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_429_retries_then_succeeds(self, monkeypatch):
+        monkeypatch.setattr("reddit_scraper.asyncio.sleep", _fake_sleep)
+        call_count = 0
+
+        def handler(req):
+            nonlocal call_count
+            call_count += 1
+            if call_count <= 2:
+                return httpx.Response(429)
+            return httpx.Response(200, json={"ok": True})
+
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(transport=transport) as client:
+            resp = await _request(client, _noop_sem(), "GET", "https://example.com")
+        assert resp.status_code == 200
+        assert call_count == 3  # 2 retries + 1 success
+
+    @pytest.mark.asyncio
+    async def test_5xx_retries_then_succeeds(self, monkeypatch):
+        monkeypatch.setattr("reddit_scraper.asyncio.sleep", _fake_sleep)
+        call_count = 0
+
+        def handler(req):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return httpx.Response(503)
+            return httpx.Response(200, json={"ok": True})
+
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(transport=transport) as client:
+            resp = await _request(client, _noop_sem(), "GET", "https://example.com")
+        assert resp.status_code == 200
+        assert call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_exhausts_retries(self, monkeypatch):
+        monkeypatch.setattr("reddit_scraper.asyncio.sleep", _fake_sleep)
+        call_count = 0
+
+        def handler(req):
+            nonlocal call_count
+            call_count += 1
+            return httpx.Response(429)
+
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(transport=transport) as client:
+            resp = await _request(client, _noop_sem(), "GET", "https://example.com")
+        assert resp.status_code == 429
+        assert call_count == 1 + MAX_RETRIES
+
+    @pytest.mark.asyncio
+    async def test_404_raises_immediately(self):
+        call_count = 0
+
+        def handler(req):
+            nonlocal call_count
+            call_count += 1
+            return httpx.Response(404)
+
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(transport=transport) as client:
+            with pytest.raises(RuntimeError, match="404"):
+                await _request(client, _noop_sem(), "GET", "https://example.com/x")
+        assert call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_non_retryable_4xx_returns_immediately(self):
+        call_count = 0
+
+        def handler(req):
+            nonlocal call_count
+            call_count += 1
+            return httpx.Response(403)
+
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(transport=transport) as client:
+            resp = await _request(client, _noop_sem(), "GET", "https://example.com")
+        assert resp.status_code == 403
+        assert call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_retry_after_header_respected(self, monkeypatch):
+        delays = []
+        async def tracking_sleep(seconds):
+            delays.append(seconds)
+
+        monkeypatch.setattr("reddit_scraper.asyncio.sleep", tracking_sleep)
+        call_count = 0
+
+        def handler(req):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return httpx.Response(429, headers={"Retry-After": "7"})
+            return httpx.Response(200, json={"ok": True})
+
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(transport=transport) as client:
+            resp = await _request(client, _noop_sem(), "GET", "https://example.com")
+        assert resp.status_code == 200
+        assert delays == [7]
+
+    @pytest.mark.asyncio
+    async def test_exponential_backoff_delays(self, monkeypatch):
+        delays = []
+        async def tracking_sleep(seconds):
+            delays.append(seconds)
+
+        monkeypatch.setattr("reddit_scraper.asyncio.sleep", tracking_sleep)
+
+        def handler(req):
+            return httpx.Response(500)
+
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(transport=transport) as client:
+            await _request(client, _noop_sem(), "GET", "https://example.com")
+        assert len(delays) == MAX_RETRIES
+        for i, d in enumerate(delays):
+            assert d == BACKOFF_BASE * (2 ** i)
+
+    @pytest.mark.asyncio
+    async def test_comments_retry_on_503(self, monkeypatch):
+        """scrape_comments uses _request, so 503 gets retried."""
+        monkeypatch.setattr("reddit_scraper.asyncio.sleep", _fake_sleep)
+        call_count = 0
+
+        def handler(req):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return httpx.Response(503)
+            return httpx.Response(200, json=_comments_response(
+                [_fake_comment("t1_a")]
+            ))
+
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(transport=transport) as client:
+            comments = await scrape_comments(
+                client, _noop_sem(),
+                "https://reddit.com/r/test/comments/abc/post/",
+            )
+        assert len(comments) == 1
+        assert call_count == 2
 
 

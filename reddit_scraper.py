@@ -144,6 +144,45 @@ def _parse_comment(comment_data: dict) -> dict:
 
 
 # ============================================================
+# Retry with backoff
+# ============================================================
+
+MAX_RETRIES = 3
+BACKOFF_BASE = 2.0  # seconds: 2, 4, 8
+RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+
+
+async def _request(client, sem, method, url, **kwargs):
+    """HTTP request with semaphore gating, retry on 429/5xx, exponential
+    backoff. Returns the httpx.Response on success or after exhausting
+    retries. Raises RuntimeError on 404."""
+    last_resp = None
+    for attempt in range(1 + MAX_RETRIES):
+        async with sem:
+            last_resp = await client.request(method, url, **kwargs)
+
+        if last_resp.status_code == 404:
+            raise RuntimeError(f"404 Not Found: {url}")
+
+        if last_resp.status_code not in RETRYABLE_STATUS_CODES:
+            return last_resp
+
+        if attempt < MAX_RETRIES:
+            retry_after = last_resp.headers.get("Retry-After")
+            if retry_after and retry_after.isdigit():
+                delay = int(retry_after)
+            else:
+                delay = BACKOFF_BASE * (2 ** attempt)
+            log.warning(
+                "HTTP %d from %s — retrying in %.1fs (attempt %d/%d)",
+                last_resp.status_code, url, delay, attempt + 1, MAX_RETRIES,
+            )
+            await asyncio.sleep(delay)
+
+    return last_resp
+
+
+# ============================================================
 # Low-level async API calls
 # ============================================================
 
@@ -159,15 +198,7 @@ async def scrape_subreddit(client, sem, subreddit, sort="hot",
         if after:
             params["after"] = after
 
-        async with sem:
-            resp = await client.get(url, params=params)
-
-        if resp.status_code == 404:
-            raise RuntimeError(f"r/{subreddit}: 404 Not Found")
-        if resp.status_code == 429:
-            await asyncio.sleep(5)
-            async with sem:
-                resp = await client.get(url, params=params)
+        resp = await _request(client, sem, "GET", url, params=params)
         resp.raise_for_status()
 
         data = resp.json().get("data", {})
@@ -193,10 +224,10 @@ async def scrape_comments(client, sem, permalink, limit=10):
     path = permalink.replace("https://reddit.com", "").replace("https://www.reddit.com", "")
     url = f"https://oauth.reddit.com{path}"
 
-    async with sem:
-        resp = await client.get(
-            url, params={"limit": limit, "sort": "top", "depth": 1, "raw_json": 1},
-        )
+    resp = await _request(
+        client, sem, "GET", url,
+        params={"limit": limit, "sort": "top", "depth": 1, "raw_json": 1},
+    )
 
     if resp.status_code != 200:
         return []
@@ -226,8 +257,7 @@ async def search_reddit(client, sem, query, sort="relevance",
         params = {"q": query, "sort": sort, "t": time_filter,
                   "limit": min(limit, 100), "raw_json": 1}
 
-    async with sem:
-        resp = await client.get(url, params=params)
+    resp = await _request(client, sem, "GET", url, params=params)
 
     if resp.status_code != 200:
         return []
@@ -291,20 +321,30 @@ async def scrape_subreddit_full(subreddit, *, posts_per_window=100,
         client_kwargs["transport"] = _transport
 
     async with httpx.AsyncClient(**client_kwargs) as client:
-        # Phase 1 — listings (parallel)
+        # Phase 1 — listings (parallel, errors logged per window)
         windows = ["week", "month", "year"]
-        listings = await asyncio.gather(*(
-            scrape_subreddit(client, sem, subreddit,
-                             sort="top", limit=posts_per_window,
-                             time_filter=w)
-            for w in windows
-        ))
+
+        async def _fetch_window(window):
+            try:
+                return await scrape_subreddit(
+                    client, sem, subreddit,
+                    sort="top", limit=posts_per_window,
+                    time_filter=window,
+                )
+            except Exception as exc:
+                log.warning("r/%s top/%s failed: %s", subreddit, window, exc)
+                return []
+
+        listings = await asyncio.gather(*(_fetch_window(w) for w in windows))
 
         # Phase 2 — dedup + rank
         unique = _dedup_and_rank(listings)
         log.info("r/%s: %d unique posts from %d raw across %s",
                  subreddit, len(unique),
                  sum(len(b) for b in listings), windows)
+
+        if not unique:
+            return []
 
         # Phase 3 — pick comment targets
         if min_score is not None:
@@ -313,7 +353,7 @@ async def scrape_subreddit_full(subreddit, *, posts_per_window=100,
             targets = list(unique)
         targets = targets[:comment_budget]
 
-        # Phase 4 — fetch comments (parallel, semaphore-limited)
+        # Phase 4 — fetch comments (parallel, errors logged per post)
         async def _attach_comments(post):
             try:
                 post["comments"] = await scrape_comments(
