@@ -22,7 +22,8 @@ from llm import get_client, llm_call
 log = logging.getLogger(__name__)
 
 JUDGE_MODEL = "gpt-5.4-mini"
-JUDGE_CONCURRENCY = 3
+JUDGE_CONCURRENCY = 20
+JUDGE_SAMPLE_SIZE = 50
 
 
 # ============================================================
@@ -282,7 +283,12 @@ def _print_report(prog_results, judge_results):
     print(f"  Quote not found:    {quote_missing:>3}/{total} ({100*quote_missing/total:.0f}%)")
     print(f"  Attribution correct:{attr_ok:>3}/{total} ({100*attr_ok/total:.0f}%)")
     print(f"  Categorized:        {categorized:>3}/{total} ({100*categorized/total:.0f}%)")
+    sev_dist = {i: 0 for i in range(1, 11)}
+    for s in severities:
+        sev_dist[s] = sev_dist.get(s, 0) + 1
     print(f"  Severity mean/std:  {sev_mean:.1f} / {sev_stdev:.1f}")
+    print(f"  Severity dist:      ", end="")
+    print("  ".join(f"{i}:{sev_dist[i]}" for i in range(1, 11)))
 
     flagged = [
         r for r in prog_results
@@ -345,6 +351,7 @@ def _print_report(prog_results, judge_results):
         "categorized": categorized,
         "severity_mean": round(sev_mean, 2),
         "severity_stdev": round(sev_stdev, 2),
+        "severity_dist": sev_dist,
         "judge": judge_results,
     }
 
@@ -353,7 +360,7 @@ def _print_report(prog_results, judge_results):
 # Public API
 # ============================================================
 
-async def run_eval(*, sample_size=20, judge_model=JUDGE_MODEL):
+async def run_eval(*, sample_size=JUDGE_SAMPLE_SIZE, judge_model=JUDGE_MODEL):
     """Run full evaluation: programmatic checks + LLM judge.
 
     Returns a metrics dict suitable for regression assertions.
@@ -387,7 +394,7 @@ def main():
         description="Evaluate extraction quality of pending painpoints",
     )
     parser.add_argument(
-        "--sample-size", type=int, default=20,
+        "--sample-size", type=int, default=JUDGE_SAMPLE_SIZE,
         help="Number of painpoints to sample for LLM judge (0 to skip)",
     )
     parser.add_argument(

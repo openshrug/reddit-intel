@@ -34,7 +34,7 @@ async def analyze(subreddit, *, min_score=None):
     log.info("pipeline: persisted %d posts, %d comments",
              len(post_id_map), comments_count)
 
-    pending_ids = await extract_painpoints(list(post_id_map.values()))
+    pending_ids, token_usage = await extract_painpoints(list(post_id_map.values()))
 
     return {
         "subreddit": subreddit,
@@ -42,6 +42,7 @@ async def analyze(subreddit, *, min_score=None):
         "posts_persisted": len(post_id_map),
         "comments_persisted": comments_count,
         "painpoints_extracted": len(pending_ids),
+        "token_usage": token_usage,
     }
 
 

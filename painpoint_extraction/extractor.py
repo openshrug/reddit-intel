@@ -14,15 +14,15 @@ from db import get_db
 from db.categories import get_category_list_flat
 from db.painpoints import save_pending_painpoints_batch
 from db.posts import get_posts_by_ids, get_comments_for_post
-from llm import get_client, llm_call
+from llm import get_client, llm_call, TokenCounter
 
 log = logging.getLogger(__name__)
 
 # --- Tunables ---
 MODEL = "gpt-5-nano"
 REASONING_EFFORT = "low"
-BATCH_TOKEN_BUDGET = 10_000
-LLM_CONCURRENCY = 10
+BATCH_TOKEN_BUDGET = 5_000
+LLM_CONCURRENCY = 100
 
 
 # --- Structured output schema ---
@@ -44,12 +44,25 @@ class ExtractionResult(BaseModel):
 # --- Instructions ---
 
 EXTRACT_INSTRUCTIONS = """\
-You are a painpoint extraction engine. You will receive a batch of Reddit \
-posts with their comments. Your job is to identify every concrete user \
-painpoint expressed in the text.
+You are a painpoint extraction engine for developer-tool product research. \
+You will receive Reddit posts with their comments. Your job is to identify \
+user painpoints that a developer could build a product or tool around.
+
+Focus on painpoints that are:
+- ACTIONABLE: someone could build an app, tool, extension, API, or service \
+to solve this problem.
+- SPECIFIC: a concrete workflow friction, missing feature, or broken \
+experience — not a vague complaint or social commentary.
+- TECHNICAL: related to software development, tooling, infrastructure, \
+developer workflow, or developer experience.
+
+Skip painpoints that are:
+- Pure opinions, memes, jokes, or sarcasm with no real pain behind them.
+- Pricing/business model complaints (unless they reveal a feature gap).
+- Social/career anxieties (e.g. "AI will take our jobs").
+- Platform politics or company drama.
 
 Rules:
-- Extract EVERY painpoint you can find — this is an exhaustive sweep.
 - A single post/comment may contain zero, one, or many painpoints.
 - Different comments on the same post may yield different painpoints.
 - quoted_text must be a verbatim substring from the source text.
@@ -72,15 +85,15 @@ async def extract_painpoints(post_ids, *, batch_token_budget=BATCH_TOKEN_BUDGET)
         batch_token_budget: target token count per LLM batch.
 
     Returns:
-        List of pending_painpoints IDs created.
+        Tuple of (list of pending_painpoints IDs created, token usage dict).
     """
     if not post_ids:
-        return []
+        return [], TokenCounter().as_dict()
 
     post_ids = _filter_unextracted(post_ids)
     if not post_ids:
         log.info("extract: all posts already extracted, skipping")
-        return []
+        return [], TokenCounter().as_dict()
 
     posts_with_comments = _load_posts_with_comments(post_ids)
     batches = _build_batches(posts_with_comments, batch_token_budget)
@@ -90,6 +103,7 @@ async def extract_painpoints(post_ids, *, batch_token_budget=BATCH_TOKEN_BUDGET)
     instructions = _build_instructions()
     client = get_client()
     sem = asyncio.Semaphore(LLM_CONCURRENCY)
+    counter = TokenCounter()
 
     async def _process_batch(batch_idx, batch):
         async with sem:
@@ -101,6 +115,7 @@ async def extract_painpoints(post_ids, *, batch_token_budget=BATCH_TOKEN_BUDGET)
                     llm_call, client, instructions, batch_text,
                     response_model=ExtractionResult, model=MODEL,
                     max_tokens=None, reasoning_effort=REASONING_EFFORT,
+                    token_counter=counter,
                 )
             except Exception as exc:
                 log.warning("extract: batch %d/%d failed: %s",
@@ -116,13 +131,18 @@ async def extract_painpoints(post_ids, *, batch_token_budget=BATCH_TOKEN_BUDGET)
 
     items = [pp.model_dump() for pps in batch_results for pp in pps]
 
+    usage = counter.as_dict()
+    log.info("extract: tokens — input: %d, output: %d (reasoning: %d, text: %d)",
+             usage["input_tokens"], usage["output_tokens"],
+             usage["reasoning_tokens"], usage["text_tokens"])
+
     if not items:
         log.info("extract: no painpoints found")
-        return []
+        return [], usage
 
     ids = save_pending_painpoints_batch(items)
     log.info("extract: saved %d pending painpoints", len(ids))
-    return ids
+    return ids, usage
 
 
 # ============================================================

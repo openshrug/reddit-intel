@@ -58,6 +58,15 @@ def save_pending_painpoints_batch(items):
         severity = max(1, min(10, int(item.get("severity", 5) or 5)))
         category_id = get_category_id_by_name(item.get("category_name"))
 
+        comment_id = item.get("comment_id")
+        if comment_id is not None:
+            exists = conn.execute(
+                "SELECT 1 FROM comments WHERE id = ?", (comment_id,)
+            ).fetchone()
+            if not exists:
+                log.warning("save_pending: comment_id %s not found, setting to NULL", comment_id)
+                comment_id = None
+
         conn.execute(
             """INSERT INTO pending_painpoints
                (post_id, comment_id, category_id, title, description,
@@ -65,7 +74,7 @@ def save_pending_painpoints_batch(items):
                VALUES (?,?,?,?,?,?,?,?)""",
             (
                 item["post_id"],
-                item.get("comment_id"),
+                comment_id,
                 category_id,
                 item["title"],
                 item.get("description"),

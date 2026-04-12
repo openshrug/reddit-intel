@@ -6,6 +6,7 @@ Used by both ingest.py and ideas.py.
 import json
 import os
 import textwrap
+import threading
 
 from openai import OpenAI
 
@@ -34,9 +35,48 @@ def debug_msg(role, content):
 _logged = {}  # id(input) -> count already printed (for multi-turn lists)
 
 
+class TokenCounter:
+    """Thread-safe accumulator for API token usage across multiple calls."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.input_tokens = 0
+        self.output_tokens = 0
+        self.reasoning_tokens = 0
+
+    def add(self, usage):
+        """Add usage from a single API response."""
+        if usage is None:
+            return
+        with self._lock:
+            self.input_tokens += usage.input_tokens
+            self.output_tokens += usage.output_tokens
+            if hasattr(usage, "output_tokens_details") and usage.output_tokens_details:
+                self.reasoning_tokens += getattr(
+                    usage.output_tokens_details, "reasoning_tokens", 0
+                )
+
+    @property
+    def text_tokens(self):
+        return self.output_tokens - self.reasoning_tokens
+
+    @property
+    def total_tokens(self):
+        return self.input_tokens + self.output_tokens
+
+    def as_dict(self):
+        return {
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "reasoning_tokens": self.reasoning_tokens,
+            "text_tokens": self.text_tokens,
+            "total_tokens": self.total_tokens,
+        }
+
+
 def llm_call(client, instructions, input, *, max_tokens=4000,
              json_mode=True, response_model=None, model="gpt-5-nano",
-             reasoning_effort=None):
+             reasoning_effort=None, token_counter=None):
     """Call OpenAI Responses API with debug logging.
 
     Args:
@@ -84,6 +124,8 @@ def llm_call(client, instructions, input, *, max_tokens=4000,
         if reasoning_effort is not None:
             parse_kwargs["reasoning"] = {"effort": reasoning_effort}
         resp = client.responses.parse(**parse_kwargs)
+        if token_counter is not None:
+            token_counter.add(resp.usage)
         if resp.output_parsed is None:
             refusal = getattr(resp, "refusal", None)
             raw = resp.output_text if hasattr(resp, "output_text") else str(resp)
@@ -109,6 +151,8 @@ def llm_call(client, instructions, input, *, max_tokens=4000,
         kwargs["text"] = {"format": {"type": "json_object"}}
 
     resp = client.responses.create(**kwargs)
+    if token_counter is not None:
+        token_counter.add(resp.usage)
     content = resp.output_text
 
     if is_debug():
