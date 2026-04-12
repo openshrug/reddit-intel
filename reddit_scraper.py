@@ -21,7 +21,15 @@ log = logging.getLogger(__name__)
 
 CONFIG_FILE = Path(__file__).parent / "config.json"
 
+# --- Tunables ---
 CONCURRENT_REQUESTS = 10
+MAX_RETRIES = 3
+BACKOFF_BASE = 2.0  # seconds: 2, 4, 8
+MAX_POST_BODY_LEN = 10_000
+MAX_COMMENT_BODY_LEN = 5_000
+POSTS_PER_WINDOW = 100
+COMMENT_BUDGET = 60
+COMMENTS_PER_POST = 10
 
 _token_cache = {"token": None, "expires_at": 0}
 
@@ -111,7 +119,7 @@ def _parse_post(post_data: dict, subreddit: str) -> dict:
         "name": post_data.get("name", ""),
         "subreddit": subreddit or post_data.get("subreddit", ""),
         "title": post_data.get("title", ""),
-        "selftext": (post_data.get("selftext", "") or "")[:10_000],
+        "selftext": (post_data.get("selftext", "") or "")[:MAX_POST_BODY_LEN],
         "url": post_data.get("url", ""),
         "author": post_data.get("author", ""),
         "score": post_data.get("score", 0),
@@ -133,7 +141,7 @@ def _parse_comment(comment_data: dict) -> dict:
     return {
         "name": comment_data.get("name", ""),
         "parent_id": comment_data.get("parent_id", ""),
-        "body": (comment_data.get("body", "") or "")[:5_000],
+        "body": (comment_data.get("body", "") or "")[:MAX_COMMENT_BODY_LEN],
         "score": comment_data.get("score", 0),
         "author": comment_data.get("author", ""),
         "created_utc": comment_data.get("created_utc"),
@@ -147,8 +155,6 @@ def _parse_comment(comment_data: dict) -> dict:
 # Retry with backoff
 # ============================================================
 
-MAX_RETRIES = 3
-BACKOFF_BASE = 2.0  # seconds: 2, 4, 8
 RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 
 
@@ -294,9 +300,10 @@ def _dedup_and_rank(listing_batches):
 # High-level: full subreddit scrape
 # ============================================================
 
-async def scrape_subreddit_full(subreddit, *, posts_per_window=100,
-                                comment_budget=60, min_score=None,
-                                comments_per_post=10, _transport=None):
+async def scrape_subreddit_full(subreddit, *, posts_per_window=POSTS_PER_WINDOW,
+                                comment_budget=COMMENT_BUDGET, min_score=None,
+                                comments_per_post=COMMENTS_PER_POST,
+                                _transport=None):
     """Scrape a subreddit across week/month/year, dedup, and fetch
     comments for the top posts by engagement.
 
