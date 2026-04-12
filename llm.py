@@ -35,7 +35,7 @@ _logged = {}  # id(input) -> count already printed (for multi-turn lists)
 
 
 def llm_call(client, instructions, input, *, max_tokens=4000,
-             json_mode=True, response_model=None, model="gpt-4.1-mini"):
+             json_mode=True, response_model=None, model="gpt-5-nano"):
     """Call OpenAI Responses API with debug logging.
 
     Args:

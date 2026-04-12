@@ -19,7 +19,7 @@ from llm import get_client, llm_call
 log = logging.getLogger(__name__)
 
 # --- Tunables ---
-MODEL = "gpt-4.1-nano"
+MODEL = "gpt-5-nano"
 BATCH_TOKEN_BUDGET = 50_000
 LLM_CONCURRENCY = 3
 
