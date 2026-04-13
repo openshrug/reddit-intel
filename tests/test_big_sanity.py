@@ -28,7 +28,7 @@ from db.painpoints import (
     promote_pending,
     save_pending_painpoint,
 )
-from db.relevance import compute_pending_relevance, MIN_RELEVANCE_TO_PROMOTE
+from db.relevance import per_source_relevance
 from db.embeddings import FakeEmbedder
 from db.llm_naming import FakeNamer
 from db.locks import merge_lock
@@ -69,14 +69,15 @@ def _seed_category(name, parent_id):
 
 
 def _seed_painpoint_in_cat(cat_id, title, severity, post_id, pp_id, relevance=None):
+    del relevance  # the cached relevance column was dropped; arg kept for callers
     conn = db.get_db()
     try:
         now = db._now()
         conn.execute(
             "INSERT INTO painpoints (title, description, severity, signal_count, "
-            "category_id, first_seen, last_updated, relevance, relevance_updated_at) "
-            "VALUES (?, '', ?, 1, ?, ?, ?, ?, ?)",
-            (title, severity, cat_id, now, now, relevance, now if relevance else None),
+            "category_id, first_seen, last_updated) "
+            "VALUES (?, '', ?, 1, ?, ?, ?)",
+            (title, severity, cat_id, now, now),
         )
         new_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         conn.execute(
@@ -125,22 +126,27 @@ class TestBigSanity:
             ("Very old but was viral", 2000, 500, 180, 7, True),
         ]
 
+        # The relevance-based drop was removed from promote_pending; every
+        # pending now promotes. Keep the scenario table for human inspection
+        # (printed relevance + promote result) but drop the drop-expectation.
         drop_results = []
-        for label, score, cmts, age_days, sev, expect_drop in drop_candidates:
+        for label, score, cmts, age_days, sev, _expect_drop in drop_candidates:
             pid = _post(f"t3_drop_{label[:10]}", score=score, num_comments=cmts,
                         created_utc=time.time() - age_days * 86400)
             pp_id = save_pending_painpoint(pid, f"Drop test: {label}", severity=sev)
-            rel = compute_pending_relevance(pp_id)
+            conn = db.get_db()
+            try:
+                post = conn.execute("SELECT * FROM posts WHERE id = ?", (pid,)).fetchone()
+                rel = per_source_relevance(post, None, severity=sev)
+            finally:
+                conn.close()
             result = promote_pending(pp_id, embedder=embedder)
-            dropped = result is None
-            match = "OK" if dropped == expect_drop else "MISMATCH"
-            drop_results.append((label, rel, dropped, expect_drop, match))
+            drop_results.append((label, rel, result))
 
-        print(f"  {'Label':<40} {'Relevance':>10} {'Dropped':>8} {'Expected':>9} {'Match':>6}")
-        print(f"  {'-'*40} {'-'*10} {'-'*8} {'-'*9} {'-'*6}")
-        for label, rel, dropped, exp, match in drop_results:
-            print(f"  {label:<40} {rel:>10.4f} {'YES' if dropped else 'no':>8} "
-                  f"{'YES' if exp else 'no':>9} {match:>6}")
+        print(f"  {'Label':<40} {'Relevance':>10} {'Promoted':>10}")
+        print(f"  {'-'*40} {'-'*10} {'-'*10}")
+        for label, rel, result in drop_results:
+            print(f"  {label:<40} {rel:>10.4f} {'YES' if result else 'no':>10}")
 
         # ==============================================================
         # 2. EMBEDDING SIMILARITY — similar painpoints merge
@@ -385,19 +391,18 @@ class TestBigSanity:
                     print(f"    [{c['id']:>3}] {c['name']:<45} "
                           f"parent={c['parent_name'] or '(root)':<25} members={count}")
 
-            # Painpoints ordered by relevance
+            # Painpoints ordered by signal_count (relevance column dropped).
             print(f"\n  PAINPOINTS ({conn.execute('SELECT COUNT(*) FROM painpoints').fetchone()[0]} total):")
             pps = conn.execute(
-                "SELECT p.id, p.title, p.severity, p.signal_count, p.relevance, "
+                "SELECT p.id, p.title, p.severity, p.signal_count, "
                 "c.name AS category "
                 "FROM painpoints p LEFT JOIN categories c ON c.id = p.category_id "
-                "ORDER BY p.relevance DESC NULLS LAST"
+                "ORDER BY p.signal_count DESC, p.id"
             ).fetchall()
-            print(f"    {'id':>4} {'rel':>8} {'sig':>4} {'sev':>4} {'category':<35} title")
-            print(f"    {'-'*4} {'-'*8} {'-'*4} {'-'*4} {'-'*35} {'-'*50}")
+            print(f"    {'id':>4} {'sig':>4} {'sev':>4} {'category':<35} title")
+            print(f"    {'-'*4} {'-'*4} {'-'*4} {'-'*35} {'-'*50}")
             for p in pps:
-                rel = f"{p['relevance']:.3f}" if p['relevance'] else "NULL"
-                print(f"    {p['id']:>4} {rel:>8} {p['signal_count']:>4} {p['severity']:>4} "
+                print(f"    {p['id']:>4} {p['signal_count']:>4} {p['severity']:>4} "
                       f"{(p['category'] or 'NULL'):<35} {p['title'][:55]}")
 
             # Dead categories — should be gone

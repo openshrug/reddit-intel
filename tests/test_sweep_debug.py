@@ -17,13 +17,12 @@ import db
 from subreddit_pipeline import analyze
 from db.category_clustering import cluster_painpoints, category_member_titles
 from db.category_events import (
+    CATEGORY_STALE_DAYS,
     MIN_SUB_CLUSTER_SIZE,
     SPLIT_RECHECK_DELTA,
-    MIN_CATEGORY_RELEVANCE,
     MERGE_CATEGORY_THRESHOLD,
-    SWEEP_CLUSTER_THRESHOLD,
     UNCATEGORIZED_NAME,
-    category_relevance_mass,
+    _category_last_activity,
 )
 from db.embeddings import (
     OpenAIEmbedder,
@@ -76,12 +75,11 @@ class TestSweepDebug:
         print("SWEEP DEBUG — instrumented per-step analysis")
         print("=" * 100)
         print(f"\nTUNABLES:")
-        print(f"  MERGE_COSINE_THRESHOLD    = {MERGE_COSINE_THRESHOLD}  (promote-time link threshold)")
+        print(f"  MERGE_COSINE_THRESHOLD    = {MERGE_COSINE_THRESHOLD}  (promote-time link + sweep clustering)")
         print(f"  CATEGORY_COSINE_THRESHOLD = {CATEGORY_COSINE_THRESHOLD}  (min sim for find_best_category)")
-        print(f"  SWEEP_CLUSTER_THRESHOLD   = {SWEEP_CLUSTER_THRESHOLD}  (sweep-time clustering)")
         print(f"  MIN_SUB_CLUSTER_SIZE      = {MIN_SUB_CLUSTER_SIZE}")
         print(f"  SPLIT_RECHECK_DELTA       = {SPLIT_RECHECK_DELTA}")
-        print(f"  MIN_CATEGORY_RELEVANCE    = {MIN_CATEGORY_RELEVANCE}")
+        print(f"  CATEGORY_STALE_DAYS       = {CATEGORY_STALE_DAYS}")
         print(f"  MERGE_CATEGORY_THRESHOLD  = {MERGE_CATEGORY_THRESHOLD}")
 
         conn = db.get_db()
@@ -103,7 +101,7 @@ class TestSweepDebug:
         ]
         print(f"  Uncategorized has {len(uncat_members)} painpoints")
         if len(uncat_members) > 0:
-            clusters = cluster_painpoints(uncat_members, threshold=SWEEP_CLUSTER_THRESHOLD,
+            clusters = cluster_painpoints(uncat_members, threshold=MERGE_COSINE_THRESHOLD,
                                           embedder=embedder)
             for i, c in enumerate(clusters):
                 status = "ELIGIBLE" if len(c) >= MIN_SUB_CLUSTER_SIZE else "too small"
@@ -137,7 +135,7 @@ class TestSweepDebug:
                 continue
 
             members = category_member_titles(conn, cat["id"])
-            clusters = cluster_painpoints(members, threshold=SWEEP_CLUSTER_THRESHOLD,
+            clusters = cluster_painpoints(members, threshold=MERGE_COSINE_THRESHOLD,
                                           embedder=embedder)
             valid = [c for c in clusters if len(c) >= MIN_SUB_CLUSTER_SIZE]
             cluster_sizes = sorted([len(c) for c in clusters], reverse=True)
@@ -165,32 +163,24 @@ class TestSweepDebug:
         print("\n" + "-" * 100)
         print("STEP 3: Delete dead categories")
         print("-" * 100)
+        from datetime import datetime, timedelta, timezone
+        cutoff = datetime.now(timezone.utc) - timedelta(days=CATEGORY_STALE_DAYS)
         for cat in cats:
             member_count = conn.execute(
                 "SELECT COUNT(*) FROM painpoints WHERE category_id = ?", (cat["id"],)
             ).fetchone()[0]
             if member_count == 0:
                 continue
-            mass = category_relevance_mass(conn, cat["id"])
-            if mass >= MIN_CATEGORY_RELEVANCE:
+            last = _category_last_activity(conn, cat["id"])
+            if last is None:
                 continue
-            # Safety check: any member with relevance > MIN_RELEVANCE_TO_PROMOTE?
-            from db.relevance import MIN_RELEVANCE_TO_PROMOTE, get_or_compute_painpoint_relevance
-            members = conn.execute(
-                "SELECT id FROM painpoints WHERE category_id = ?", (cat["id"],)
-            ).fetchall()
-            blocker = None
-            for m in members:
-                r = get_or_compute_painpoint_relevance(m["id"], conn=conn)
-                if r is not None and r > MIN_RELEVANCE_TO_PROMOTE:
-                    blocker = (m["id"], r)
-                    break
-            if blocker:
-                print(f"  '{cat['name']:<35}' mass={mass:.3f} < {MIN_CATEGORY_RELEVANCE} "
-                      f"→ BLOCKED by live member pp_id={blocker[0]} (rel={blocker[1]:.2f})")
+            age_days = (datetime.now(timezone.utc) - last).total_seconds() / 86400.0
+            if last >= cutoff:
+                print(f"  '{cat['name']:<35}' last_activity={age_days:.1f}d ago "
+                      f"< {CATEGORY_STALE_DAYS} → skip (fresh)")
             else:
-                print(f"  '{cat['name']:<35}' mass={mass:.3f} < {MIN_CATEGORY_RELEVANCE} "
-                      f"→ would DELETE (no live members)")
+                print(f"  '{cat['name']:<35}' last_activity={age_days:.1f}d ago "
+                      f"≥ {CATEGORY_STALE_DAYS} → would DELETE (stale)")
 
         # ------------------------------------------------------------------
         # STEP 4 debug: Merge sibling categories

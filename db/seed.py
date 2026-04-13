@@ -8,31 +8,48 @@ TAXONOMY_FILE = Path(__file__).parents[1] / "taxonomy.yaml"
 
 
 def seed_taxonomy():
-    """Populate the categories table from taxonomy.yaml if empty."""
-    conn = get_db()
-    if conn.execute("SELECT COUNT(*) FROM categories").fetchone()[0] > 0:
-        conn.close()
-        return
+    """Populate the categories table from taxonomy.yaml if empty.
 
+    Wrapped in BEGIN IMMEDIATE so two concurrent init_db() invocations
+    can't both pass the empty-table check and double-seed. The second
+    caller will block on BEGIN IMMEDIATE, then re-check the count and
+    short-circuit.
+    """
     if not TAXONOMY_FILE.exists():
-        conn.close()
         return
 
-    taxonomy = yaml.safe_load(TAXONOMY_FILE.read_text())
-    now = _now()
+    conn = get_db()
+    try:
+        # BEGIN IMMEDIATE acquires the write lock — second concurrent
+        # caller waits here. After acquisition we re-check the count
+        # so we don't seed twice if the other caller already did.
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            if conn.execute("SELECT COUNT(*) FROM categories").fetchone()[0] > 0:
+                conn.execute("ROLLBACK")
+                return
 
-    for parent_name, parent_data in taxonomy.items():
-        conn.execute(
-            "INSERT INTO categories (name, parent_id, description, created_at) VALUES (?,?,?,?)",
-            (parent_name, None, parent_data.get("desc", ""), now),
-        )
-        parent_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            taxonomy = yaml.safe_load(TAXONOMY_FILE.read_text())
+            now = _now()
 
-        for child_name, child_desc in parent_data.get("children", {}).items():
-            conn.execute(
-                "INSERT INTO categories (name, parent_id, description, created_at) VALUES (?,?,?,?)",
-                (child_name, parent_id, child_desc, now),
-            )
+            for parent_name, parent_data in taxonomy.items():
+                conn.execute(
+                    "INSERT INTO categories (name, parent_id, description, created_at) "
+                    "VALUES (?,?,?,?)",
+                    (parent_name, None, parent_data.get("desc", ""), now),
+                )
+                parent_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
-    conn.commit()
-    conn.close()
+                for child_name, child_desc in parent_data.get("children", {}).items():
+                    conn.execute(
+                        "INSERT INTO categories (name, parent_id, description, created_at) "
+                        "VALUES (?,?,?,?)",
+                        (child_name, parent_id, child_desc, now),
+                    )
+
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+    finally:
+        conn.close()

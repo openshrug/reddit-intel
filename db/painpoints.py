@@ -1,12 +1,10 @@
 import logging
 import sqlite3
 
-from . import get_db, _now
+from . import get_db, _now, UNCATEGORIZED_NAME, uncategorized_id
 from .categories import get_category_id_by_name
 
 log = logging.getLogger(__name__)
-
-UNCATEGORIZED_NAME = "Uncategorized"
 
 
 # ---------------------------------------------------------------------------
@@ -15,32 +13,64 @@ UNCATEGORIZED_NAME = "Uncategorized"
 
 def save_pending_painpoint(post_id, title, *, comment_id=None,
                            category_name=None, description=None,
-                           quoted_text=None, severity=5):
+                           quoted_text=None, severity):
     """Append a single LLM-extracted painpoint observation.
 
     The category_name is resolved to a category_id at insert time.
-    Returns the new pending_painpoints.id.
+    Returns the new pending_painpoints.id, or None if FK validation
+    fails (post_id doesn't exist) — silent skip with warning, matching
+    save_pending_painpoints_batch's behavior on hallucinated IDs.
     """
-    severity = max(1, min(10, int(severity or 5)))
+    if severity is None:
+        raise ValueError("severity is required (1-10) — no silent default")
+    severity = max(1, min(10, int(severity)))
     category_id = get_category_id_by_name(category_name)
 
     conn = get_db()
-    conn.execute(
-        """INSERT INTO pending_painpoints
-           (post_id, comment_id, category_id, title, description,
-            quoted_text, severity, extracted_at)
-           VALUES (?,?,?,?,?,?,?,?)""",
-        (post_id, comment_id, category_id, title, description,
-         quoted_text, severity, _now()),
-    )
-    pp_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-    conn.commit()
-    conn.close()
-    return pp_id
+    try:
+        # FK validation parity with the batch path — skip silently with
+        # a warning instead of raising IntegrityError when the LLM
+        # hallucinates a post_id or comment_id not in the input.
+        if not conn.execute(
+            "SELECT 1 FROM posts WHERE id = ?", (post_id,)
+        ).fetchone():
+            log.warning(
+                "save_pending: post_id %s not found — skipping this painpoint "
+                "(LLM hallucinated an ID?)", post_id,
+            )
+            return None
+
+        if comment_id is not None and not conn.execute(
+            "SELECT 1 FROM comments WHERE id = ?", (comment_id,)
+        ).fetchone():
+            log.warning(
+                "save_pending: comment_id %s not found, setting to NULL",
+                comment_id,
+            )
+            comment_id = None
+
+        conn.execute(
+            """INSERT INTO pending_painpoints
+               (post_id, comment_id, category_id, title, description,
+                quoted_text, severity, extracted_at)
+               VALUES (?,?,?,?,?,?,?,?)""",
+            (post_id, comment_id, category_id, title, description,
+             quoted_text, severity, _now()),
+        )
+        pp_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.commit()
+        return pp_id
+    finally:
+        conn.close()
 
 
 def save_pending_painpoints_batch(items):
     """Batch-insert multiple pending painpoints in one transaction.
+
+    Validates post_id and comment_id existence in TWO bulk SELECTs
+    instead of 2N (was a per-item round-trip). The LLM can hallucinate
+    IDs not in the input batch — those rows are skipped (post) or have
+    comment_id NULLed.
 
     Args:
         items: list of dicts, each with keys matching save_pending_painpoint
@@ -49,37 +79,63 @@ def save_pending_painpoints_batch(items):
     Returns:
         List of new pending_painpoints ids.
     """
+    if not items:
+        return []
+
     conn = get_db()
     now = _now()
     ids = []
 
     try:
+        # Bulk-validate post_ids in one query.
+        wanted_post_ids = {item["post_id"] for item in items}
+        existing_post_ids = {
+            r[0]
+            for r in conn.execute(
+                f"SELECT id FROM posts WHERE id IN "
+                f"({','.join('?' * len(wanted_post_ids))})",
+                list(wanted_post_ids),
+            ).fetchall()
+        }
+        # Bulk-validate comment_ids in one query.
+        wanted_comment_ids = {
+            item["comment_id"] for item in items
+            if item.get("comment_id") is not None
+        }
+        existing_comment_ids = set()
+        if wanted_comment_ids:
+            existing_comment_ids = {
+                r[0]
+                for r in conn.execute(
+                    f"SELECT id FROM comments WHERE id IN "
+                    f"({','.join('?' * len(wanted_comment_ids))})",
+                    list(wanted_comment_ids),
+                ).fetchall()
+            }
+
         for item in items:
             post_id = item["post_id"]
-            # Validate post_id exists — the LLM can hallucinate post IDs not
-            # in the input, which would trip the FK constraint and poison the
-            # whole transaction.
-            exists = conn.execute(
-                "SELECT 1 FROM posts WHERE id = ?", (post_id,)
-            ).fetchone()
-            if not exists:
+            if post_id not in existing_post_ids:
                 log.warning(
                     "save_pending: post_id %s not found — skipping this painpoint "
                     "(LLM hallucinated an ID?)", post_id,
                 )
                 continue
 
-            severity = max(1, min(10, int(item.get("severity", 5) or 5)))
+            sev = item.get("severity")
+            if sev is None:
+                raise ValueError(
+                    f"severity missing from item for post_id={post_id} "
+                    "— extraction must emit 1-10"
+                )
+            severity = max(1, min(10, int(sev)))
             category_id = get_category_id_by_name(item.get("category_name"))
 
             comment_id = item.get("comment_id")
-            if comment_id is not None:
-                exists = conn.execute(
-                    "SELECT 1 FROM comments WHERE id = ?", (comment_id,)
-                ).fetchone()
-                if not exists:
-                    log.warning("save_pending: comment_id %s not found, setting to NULL", comment_id)
-                    comment_id = None
+            if comment_id is not None and comment_id not in existing_comment_ids:
+                log.warning("save_pending: comment_id %s not found, setting to NULL",
+                            comment_id)
+                comment_id = None
 
             conn.execute(
                 """INSERT INTO pending_painpoints
@@ -123,111 +179,8 @@ def get_unmerged_pending():
     return [dict(r) for r in rows]
 
 
-# ---------------------------------------------------------------------------
-# Merged painpoints
-# ---------------------------------------------------------------------------
-
-def upsert_painpoint(title, *, description=None, severity=5, category_id=None):
-    """Create or update a merged painpoint.
-
-    If a painpoint with this exact title already exists, bumps signal_count
-    and updates last_updated. Otherwise creates a new row.
-
-    Returns the painpoint id.
-    """
-    severity = max(1, min(10, int(severity or 5)))
-    conn = get_db()
-    now = _now()
-
-    existing = conn.execute(
-        "SELECT id FROM painpoints WHERE title = ?", (title,)
-    ).fetchone()
-
-    if existing:
-        conn.execute(
-            "UPDATE painpoints SET signal_count = signal_count + 1, last_updated = ? WHERE id = ?",
-            (now, existing["id"]),
-        )
-        pid = existing["id"]
-    else:
-        conn.execute(
-            "INSERT INTO painpoints (title, description, severity, category_id, first_seen, last_updated) "
-            "VALUES (?,?,?,?,?,?)",
-            (title, description or "", severity, category_id, now, now),
-        )
-        pid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-
-    conn.commit()
-    conn.close()
-    return pid
-
-
-def link_painpoint_source(painpoint_id, pending_painpoint_id):
-    """Link a merged painpoint to a pending (raw) observation."""
-    conn = get_db()
-    try:
-        conn.execute(
-            "INSERT INTO painpoint_sources (painpoint_id, pending_painpoint_id) VALUES (?,?)",
-            (painpoint_id, pending_painpoint_id),
-        )
-        conn.commit()
-    except sqlite3.IntegrityError:
-        pass
-    conn.close()
-
-
-def merge_pending_into_painpoint(pending_ids, title, *, description=None,
-                                 severity=5, category_id=None):
-    """Full merge operation: create/update merged painpoint and link sources.
-
-    Args:
-        pending_ids: list of pending_painpoints.id to fold into one painpoint.
-        title: merged painpoint title.
-        description: merged description.
-        severity: merged severity (1-10).
-        category_id: single category for this merged painpoint.
-
-    Returns:
-        The merged painpoint id.
-    """
-    conn = get_db()
-    now = _now()
-    severity = max(1, min(10, int(severity or 5)))
-
-    existing = conn.execute(
-        "SELECT id, signal_count FROM painpoints WHERE title = ?", (title,)
-    ).fetchone()
-
-    if existing:
-        conn.execute(
-            "UPDATE painpoints SET signal_count = signal_count + ?, last_updated = ? WHERE id = ?",
-            (len(pending_ids), now, existing["id"]),
-        )
-        painpoint_id = existing["id"]
-    else:
-        conn.execute(
-            "INSERT INTO painpoints (title, description, severity, signal_count, category_id, "
-            "first_seen, last_updated) VALUES (?,?,?,?,?,?,?)",
-            (title, description or "", severity, len(pending_ids), category_id, now, now),
-        )
-        painpoint_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-
-    for pid in pending_ids:
-        try:
-            conn.execute(
-                "INSERT INTO painpoint_sources (painpoint_id, pending_painpoint_id) VALUES (?,?)",
-                (painpoint_id, pid),
-            )
-        except sqlite3.IntegrityError:
-            pass
-
-    conn.commit()
-    conn.close()
-    return painpoint_id
-
-
 # ===========================================================================
-# Painpoint ingest pipeline (see docs/PAINPOINT_INGEST_PLAN.md)
+# Painpoint ingest pipeline
 # ===========================================================================
 
 
@@ -255,115 +208,40 @@ def add_pending_source(pending_id, post_id, comment_id=None, *, conn=None):
 
 
 def get_uncategorized_id(conn=None):
-    """Resolve the sentinel Uncategorized category id (§7.6)."""
+    """Backward-compat shim — delegates to db.uncategorized_id().
+    Kept because tests / external callers may import this name."""
     own_conn = conn is None
     conn = conn or get_db()
     try:
-        row = conn.execute(
-            "SELECT id FROM categories WHERE name = ?", (UNCATEGORIZED_NAME,)
-        ).fetchone()
-        if row is None:
-            raise RuntimeError(
-                "Uncategorized sentinel category missing — db.init_db() not run?"
-            )
-        return row["id"]
+        return uncategorized_id(conn)
     finally:
         if own_conn:
             conn.close()
 
 
-def merge_painpoints(conn, survivor_id, loser_id):
-    """Merge two merged painpoints into one.
-
-    Mechanical contract:
-      1. Repoint loser's painpoint_sources rows at the survivor.
-      2. survivor.signal_count += loser.signal_count
-      3. survivor.first_seen = min(survivor.first_seen, loser.first_seen)
-      4. survivor.last_updated = now()
-      5. DELETE the loser's embedding from painpoint_vec.
-      6. DELETE the loser row from painpoints.
-      7. survivor.category_id is **unchanged** — it keeps whatever category
-         it was in. Deliberate-but-arbitrary.
-      8. Logged via `logging.info` (NOT to category_events).
-
-    NOTE: This function is currently unused by the live pipeline — Layer
-    A multi-match merging was removed when embeddings replaced MinHash.
-    Kept as a utility in case we need programmatic painpoint merging
-    (e.g., a future admin / CLI command).
-
-    Caller is responsible for the merge_lock; this function does not
-    open/close its own transaction.
-    """
-    survivor = conn.execute(
-        "SELECT id, signal_count, first_seen FROM painpoints WHERE id = ?",
-        (survivor_id,),
-    ).fetchone()
-    loser = conn.execute(
-        "SELECT id, signal_count, first_seen FROM painpoints WHERE id = ?",
-        (loser_id,),
-    ).fetchone()
-    if survivor is None or loser is None:
-        raise ValueError(
-            f"merge_painpoints: missing row (survivor={survivor_id}, loser={loser_id})"
-        )
-    if survivor_id == loser_id:
-        return survivor_id
-
-    # 1. Repoint sources. INSERT OR IGNORE because the survivor may already
-    # cite some of the same pending pps (idempotent re-merge).
-    pending_ids = [
-        r["pending_painpoint_id"]
-        for r in conn.execute(
-            "SELECT pending_painpoint_id FROM painpoint_sources WHERE painpoint_id = ?",
-            (loser_id,),
-        ).fetchall()
-    ]
-    for pid in pending_ids:
-        try:
-            conn.execute(
-                "INSERT INTO painpoint_sources (painpoint_id, pending_painpoint_id) "
-                "VALUES (?, ?)",
-                (survivor_id, pid),
-            )
-        except sqlite3.IntegrityError:
-            pass
-    conn.execute(
-        "DELETE FROM painpoint_sources WHERE painpoint_id = ?", (loser_id,)
-    )
-
-    # 2-4. Update survivor's stats.
-    new_signal = (survivor["signal_count"] or 0) + (loser["signal_count"] or 0)
-    new_first_seen = min(survivor["first_seen"], loser["first_seen"])
-    conn.execute(
-        "UPDATE painpoints SET signal_count = ?, first_seen = ?, last_updated = ? "
-        "WHERE id = ?",
-        (new_signal, new_first_seen, _now(), survivor_id),
-    )
-
-    # 5. Delete the loser (and its embedding from painpoint_vec).
-    conn.execute("DELETE FROM painpoint_vec WHERE rowid = ?", (loser_id,))
-    conn.execute("DELETE FROM painpoints WHERE id = ?", (loser_id,))
-
-    # 8. Audit log to file (not to category_events).
-    log.info(
-        "merge_painpoints survivor=%s loser=%s pre_signal_survivor=%s "
-        "pre_signal_loser=%s post_signal=%s",
-        survivor_id, loser_id,
-        survivor["signal_count"], loser["signal_count"], new_signal,
-    )
-
-    return survivor_id
-
-
-
-def _create_painpoint_from_pending(conn, pending_id, embedding=None, embedder=None):
+def _create_painpoint_from_pending(conn, pending_id, embedding, embedder=None):
     """Create a new merged painpoint from a pending painpoint.
 
-    Uses the LLM-proposed category from extraction time if it resolved
-    to a real category in the taxonomy; if embedding-based category
-    assignment is available, uses find_best_category instead. Falls back
-    to the Uncategorized sentinel if no good match.
+    `embedding` is required (no default). The previous "no embedding"
+    path created painpoints that never got stored in painpoint_vec —
+    invisible to find_most_similar_painpoint forever, so every future
+    promote of the same pain would create a duplicate. Production
+    always supplied an embedding, so this branch was dead code with a
+    silent-corruption footgun. Now made explicit.
+
+    Uses find_best_category(conn, embedding) to assign the painpoint to
+    the best-matching category by cosine similarity; falls back to
+    Uncategorized internally if nothing scores above
+    CATEGORY_COSINE_THRESHOLD.
     """
+    if embedding is None:
+        raise ValueError(
+            "_create_painpoint_from_pending requires an embedding — "
+            "without one the new painpoint would be invisible to "
+            "find_most_similar_painpoint and every future promote of "
+            "the same pain would create a duplicate"
+        )
+
     from .embeddings import (
         find_best_category,
         store_painpoint_embedding,
@@ -371,25 +249,13 @@ def _create_painpoint_from_pending(conn, pending_id, embedding=None, embedder=No
     )
 
     pending = conn.execute(
-        "SELECT id, title, description, severity, category_id "
-        "FROM pending_painpoints WHERE id = ?",
+        "SELECT id, title, description, severity FROM pending_painpoints WHERE id = ?",
         (pending_id,),
     ).fetchone()
     if pending is None:
         raise ValueError(f"pending_painpoint {pending_id} not found")
 
-    # Category assignment: prefer embedding-based if we have an embedding,
-    # else fall back to the LLM-proposed category from extraction time.
-    if embedding is not None:
-        category_id = find_best_category(conn, embedding, embedder=embedder)
-    else:
-        category_id = pending["category_id"]
-        if category_id is None:
-            category_id = get_uncategorized_id(conn=conn)
-            log.debug(
-                "pending_painpoint %s has no resolved category -- using Uncategorized",
-                pending_id,
-            )
+    category_id = find_best_category(conn, embedding, embedder=embedder)
 
     now = _now()
     conn.execute(
@@ -407,20 +273,28 @@ def _create_painpoint_from_pending(conn, pending_id, embedding=None, embedder=No
         (new_id, pending_id),
     )
 
-    # Store embedding so subsequent painpoints can match against it.
-    if embedding is not None:
-        store_painpoint_embedding(conn, new_id, embedding)
-        update_category_embedding(conn, category_id)
+    # Store embedding + refresh the target category's centroid (it
+    # gained a new member).
+    store_painpoint_embedding(conn, new_id, embedding)
+    update_category_embedding(conn, category_id)
 
     return new_id
 
 
 def _link_pending_to_painpoint(conn, painpoint_id, pending_id):
-    """Link a pending pp into an existing merged painpoint, bump signal_count,
-    and refresh the category's embedding so the centroid stays in sync with
-    the new evidence."""
-    from .embeddings import update_category_embedding
+    """Link a pending pp into an existing merged painpoint and bump
+    signal_count.
 
+    NOTE: does NOT call update_category_embedding. Linking adds a new
+    PENDING source to an existing painpoint — the painpoint's category
+    membership and its own embedding don't change, so the category
+    centroid (mean of member painpoint embeddings) is unchanged.
+    Re-computing it after every link was O(N²) wasted work in batch
+    promote runs. The centroid only shifts when:
+      - a painpoint is created (handled in _create_painpoint_from_pending)
+      - a painpoint moves between categories (handled in apply_*_event)
+      - merge_painpoints retires a painpoint (handled there)
+    """
     try:
         conn.execute(
             "INSERT INTO painpoint_sources (painpoint_id, pending_painpoint_id) VALUES (?, ?)",
@@ -432,36 +306,25 @@ def _link_pending_to_painpoint(conn, painpoint_id, pending_id):
             (_now(), painpoint_id),
         )
     except sqlite3.IntegrityError:
-        # Already linked — idempotent; skip the centroid refresh too.
+        # Already linked — idempotent.
         return
-
-    # Refresh the target painpoint's category centroid. Cheap (mean of
-    # member embeddings) and keeps tree traversal accurate as evidence
-    # accumulates.
-    row = conn.execute(
-        "SELECT category_id FROM painpoints WHERE id = ?", (painpoint_id,)
-    ).fetchone()
-    if row and row["category_id"] is not None:
-        update_category_embedding(conn, row["category_id"])
 
 
 def promote_pending(pending_id, *, embedder=None, embedding=None, now=None):
     """End-to-end promotion of one pending painpoint into the merged table.
 
     Steps:
-      1. Compute relevance. If below threshold, hard-delete and return None.
-      2. Compute embedding (calls OpenAI API, outside the lock) — unless
+      1. Compute embedding (calls OpenAI API, outside the lock) — unless
          a pre-computed `embedding` was passed in (batch path from
          promoter.run_once).
-      3. Acquire the merge lock.
-      4. Inside the lock: cosine similarity search against all existing
+      2. Acquire the merge lock.
+      3. Inside the lock: cosine similarity search against all existing
          painpoint embeddings. If above MERGE_COSINE_THRESHOLD → link.
          Otherwise → create new painpoint in the best-matching category.
 
-    Returns the painpoints.id the pending pp was attached to, or None if
-    the pending row was dropped for low relevance.
+    Returns the painpoints.id the pending pp was attached to.
     """
-    from .relevance import compute_pending_relevance, MIN_RELEVANCE_TO_PROMOTE
+    del now  # accepted for API compatibility
     from .embeddings import (
         MERGE_COSINE_THRESHOLD,
         find_most_similar_painpoint,
@@ -472,25 +335,6 @@ def promote_pending(pending_id, *, embedder=None, embedding=None, now=None):
         from .embeddings import OpenAIEmbedder
         embedder = OpenAIEmbedder()
 
-    # Step 1 — relevance check + drop (outside the lock).
-    conn = get_db()
-    try:
-        relevance = compute_pending_relevance(pending_id, conn=conn, now=now)
-        if relevance < MIN_RELEVANCE_TO_PROMOTE:
-            conn.execute(
-                "DELETE FROM pending_painpoints WHERE id = ?", (pending_id,)
-            )
-            conn.commit()
-            log.info(
-                "promote_pending dropped pending_id=%s relevance=%.4f < %.4f",
-                pending_id, relevance, MIN_RELEVANCE_TO_PROMOTE,
-            )
-            return None
-    finally:
-        conn.close()
-
-    # Step 2 — compute embedding (outside the lock, may call OpenAI).
-    # Skip if caller pre-computed it (batch path from promoter.run_once).
     if embedding is None:
         conn = get_db()
         try:
@@ -504,7 +348,7 @@ def promote_pending(pending_id, *, embedder=None, embedding=None, now=None):
         text = f"{pending['title']} {pending['description'] or ''}".strip()
         embedding = embedder.embed(text)
 
-    # Steps 3-4 — under the lock: cosine similarity → link or create.
+    # Under the lock: cosine similarity → link or create.
     conn = get_db()
     try:
         with merge_lock(conn, timeout=30):

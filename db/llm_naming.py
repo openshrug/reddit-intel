@@ -134,32 +134,6 @@ class LLMNamer:
         raw = self._call(system, user)
         return json.loads(raw)
 
-    def name_split_subcategories(
-        self, parent_name: str, clusters: List[List[str]],
-        existing_taxonomy: Optional[List[dict]] = None,
-    ):
-        """Given the painpoint titles in each sub-cluster, propose a name +
-        description for each. Returns a list of dicts in the same order.
-
-        The parent category is already known (the one being split), so the
-        LLM doesn't need to pick a parent — just name the children.
-        """
-        system = (
-            "You are a taxonomist splitting an over-broad category into sub-categories. "
-            "Given the parent category and N sub-clusters of painpoint titles, propose "
-            "a short name and one-sentence description for each sub-cluster. "
-            "Reply with JSON: {\"subcategories\": [{\"name\": \"...\", \"description\": \"...\"}, ...]}."
-        )
-        user = json.dumps(
-            {
-                "parent": parent_name,
-                "clusters": [c[:10] for c in clusters],
-            }
-        )
-        raw = self._call(system, user)
-        return json.loads(raw)["subcategories"]
-
-
     def decide_split(self, category_name: str, category_description: str,
                      total_members: int, clusters: List[dict]) -> SplitDecision:
         """Ask the LLM whether a bloated category should be split.
@@ -261,15 +235,6 @@ class FakeNamer:
         i = self._next()
         return {"name": f"AutoCat-{i}", "description": f"auto-named cluster #{i}",
                 "parent": None}
-
-    def name_split_subcategories(self, parent_name, clusters,
-                                 existing_taxonomy=None):
-        if self._split_fn is not None:
-            return self._split_fn(parent_name, clusters)
-        return [
-            {"name": f"{parent_name}/Sub-{i + 1}", "description": f"sub-cluster #{i + 1}"}
-            for i, _ in enumerate(clusters)
-        ]
 
     def describe_merged_category(self, survivor_name, loser_name,
                                  sample_member_titles):

@@ -1,10 +1,10 @@
 """Top-level category worker -- periodic sweep that mutates the taxonomy.
 
 Runs as a separate OS process from the promoter. Acquires the merge lock
-once per sweep, runs four passes (Uncategorized -> split -> delete -> merge),
-each emitting events through the per-event acceptance test in
-db/category_events.py. Idempotent: running twice in a row produces no new
-*accepted* events on the second run.
+once per sweep, runs five passes (Uncategorized -> split -> delete ->
+merge -> reroute), each emitting events through the per-event acceptance
+test in db/category_events.py. Idempotent: running twice in a row
+produces no new *accepted* events on the second run.
 """
 
 import logging
@@ -15,6 +15,7 @@ from db.category_events import (
     prefetch_llm_batch,
     propose_delete_events,
     propose_merge_events,
+    propose_reroute_events,
     propose_split_events,
     propose_uncategorized_events,
 )
@@ -49,6 +50,7 @@ def run_sweep(namer=None, embedder=None):
         "split":         {"proposed": 0, "accepted": 0},
         "delete":        {"proposed": 0, "accepted": 0},
         "merge":         {"proposed": 0, "accepted": 0},
+        "reroute":       {"proposed": 0, "accepted": 0},
     }
 
     conn = db.get_db()
@@ -87,6 +89,14 @@ def run_sweep(namer=None, embedder=None):
                 summary["merge"]["proposed"] += 1
                 if apply_with_test(conn, event, namer):
                     summary["merge"]["accepted"] += 1
+
+            # Step 5 -- per-painpoint reroute (no LLM calls, pure embedding).
+            # Handles singleton mis-routings the split step can't cluster.
+            # Must run AFTER merges so the target centroids reflect final state.
+            for event in list(propose_reroute_events(conn, embedder=embedder)):
+                summary["reroute"]["proposed"] += 1
+                if apply_with_test(conn, event, namer):
+                    summary["reroute"]["accepted"] += 1
     finally:
         conn.close()
 

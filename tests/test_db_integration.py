@@ -17,10 +17,60 @@ from db.painpoints import (
     save_pending_painpoint,
     save_pending_painpoints_batch,
     get_unmerged_pending,
-    merge_pending_into_painpoint,
-    link_painpoint_source,
-    upsert_painpoint,
 )
+
+
+# The Layer A multi-match merging helpers (`merge_pending_into_painpoint`,
+# `link_painpoint_source`, `upsert_painpoint`) were removed — the live
+# pipeline promotes per-pending via embedding cosine similarity instead.
+# These tiny SQL helpers reproduce just enough of their behaviour to keep
+# the FK / query / provenance tests below meaningful without reviving the
+# dead API surface.
+def _test_upsert_painpoint(conn, title, *, description="", severity=5, category_id=None,
+                           signal_count=1):
+    now = db._now()
+    existing = conn.execute(
+        "SELECT id FROM painpoints WHERE title = ?", (title,),
+    ).fetchone()
+    if existing:
+        conn.execute(
+            "UPDATE painpoints SET signal_count = signal_count + ?, "
+            "last_updated = ? WHERE id = ?",
+            (signal_count, now, existing["id"]),
+        )
+        return existing["id"]
+    conn.execute(
+        "INSERT INTO painpoints (title, description, severity, signal_count, "
+        "category_id, first_seen, last_updated) VALUES (?,?,?,?,?,?,?)",
+        (title, description, severity, signal_count, category_id, now, now),
+    )
+    return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+
+def _test_link_source(conn, painpoint_id, pending_id):
+    try:
+        conn.execute(
+            "INSERT INTO painpoint_sources (painpoint_id, pending_painpoint_id) "
+            "VALUES (?, ?)", (painpoint_id, pending_id),
+        )
+    except sqlite3.IntegrityError:
+        pass
+
+
+def _test_merge_pending(pending_ids, *, title, description="", severity=5,
+                        category_id=None):
+    conn = db.get_db()
+    try:
+        pid = _test_upsert_painpoint(
+            conn, title, description=description, severity=severity,
+            category_id=category_id, signal_count=len(pending_ids),
+        )
+        for pp in pending_ids:
+            _test_link_source(conn, pid, pp)
+        conn.commit()
+        return pid
+    finally:
+        conn.close()
 from db.categories import (
     get_category_by_name,
     get_category_id_by_name,
@@ -334,8 +384,9 @@ class TestPendingPainpoints:
         conn.close()
         assert row["severity"] == 1
 
-    def test_severity_zero_treated_as_default(self):
-        """severity=0 is falsy so the code treats it as 'not provided' → default 5."""
+    def test_severity_zero_clamped_to_one(self):
+        """severity=0 is out-of-range; the clamp floors it to 1 (no silent
+        substitution to a made-up default)."""
         pp = save_pending_painpoint(
             _state["post_id"], "Severity zero test", severity=0
         )
@@ -344,7 +395,14 @@ class TestPendingPainpoints:
             "SELECT severity FROM pending_painpoints WHERE id = ?", (pp,)
         ).fetchone()
         conn.close()
-        assert row["severity"] == 5
+        assert row["severity"] == 1
+
+    def test_severity_none_raises(self):
+        """severity=None must raise rather than silently default to 5."""
+        with pytest.raises(ValueError, match="severity"):
+            save_pending_painpoint(
+                _state["post_id"], "Severity none test", severity=None
+            )
 
     def test_severity_clamping_high(self):
         pp = save_pending_painpoint(
@@ -419,7 +477,7 @@ class TestBatchPending:
 class TestMergeWorkflow:
 
     def test_merge_creates_painpoint_and_sources(self):
-        merged_id = merge_pending_into_painpoint(
+        merged_id = _test_merge_pending(
             pending_ids=[_state["pp1"], _state["pp3"]],
             title="LLM inference hangs on Apple Silicon",
             description="Multiple reports of 70B models stalling at high context on M-series Macs",
@@ -447,8 +505,13 @@ class TestMergeWorkflow:
 
     def test_duplicate_source_link_is_idempotent(self):
         """Re-linking the same pending painpoint must not create duplicate rows."""
-        link_painpoint_source(_state["merged_id"], _state["pp1"])
-        link_painpoint_source(_state["merged_id"], _state["pp3"])
+        conn = db.get_db()
+        try:
+            _test_link_source(conn, _state["merged_id"], _state["pp1"])
+            _test_link_source(conn, _state["merged_id"], _state["pp3"])
+            conn.commit()
+        finally:
+            conn.close()
 
         conn = db.get_db()
         sources = conn.execute(
@@ -482,7 +545,7 @@ class TestMergeSignalBump:
         )
         _state["new_pp"] = new_pp
 
-        merged_id2 = merge_pending_into_painpoint(
+        merged_id2 = _test_merge_pending(
             pending_ids=[new_pp],
             title="LLM inference hangs on Apple Silicon",
             severity=7,
@@ -705,7 +768,7 @@ class TestFKCascade:
             "title": "Blocker post",
             "permalink": "/r/test/blocker/",
         })
-        save_pending_painpoint(blocker_post, "Blocks deletion")
+        save_pending_painpoint(blocker_post, "Blocks deletion", severity=5)
 
         conn = db.get_db()
         with pytest.raises(sqlite3.IntegrityError):
@@ -716,9 +779,9 @@ class TestFKCascade:
     def test_painpoint_source_cascade(self):
         """Deleting a merged painpoint cascades to painpoint_sources."""
         pp = save_pending_painpoint(
-            _state["post2_id"], "Cascade source test"
+            _state["post2_id"], "Cascade source test", severity=5
         )
-        pid = merge_pending_into_painpoint(
+        pid = _test_merge_pending(
             [pp], title="Cascade test painpoint", severity=5
         )
 

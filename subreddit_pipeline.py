@@ -45,7 +45,7 @@ async def analyze(subreddit, *, min_score=None):
     # embedding cosine similarity. Any failure (API error, network, etc.)
     # is caught — the pending rows stay in the queue for the next
     # promoter run to pick up.
-    promoted = {"processed": 0, "linked": 0, "dropped": 0, "error": None}
+    promoted = {"processed": 0, "linked": 0, "error": None}
     try:
         from promoter import run_once
         from db.embeddings import OpenAIEmbedder
@@ -53,8 +53,8 @@ async def analyze(subreddit, *, min_score=None):
         log.info("pipeline: promoting pending painpoints")
         promoted = run_once(embedder=OpenAIEmbedder())
         promoted["error"] = None
-        log.info("pipeline: promoted %d, dropped %d (of %d)",
-                 promoted["linked"], promoted["dropped"], promoted["processed"])
+        log.info("pipeline: promoted %d (of %d processed)",
+                 promoted["linked"], promoted["processed"])
     except Exception as e:
         log.warning(
             "pipeline: promotion stage failed (%s: %s) — pending painpoints "
@@ -70,7 +70,6 @@ async def analyze(subreddit, *, min_score=None):
         "comments_persisted": comments_count,
         "painpoints_extracted": len(pending_ids),
         "painpoints_linked": promoted["linked"],
-        "painpoints_dropped": promoted["dropped"],
         "promote_error": promoted["error"],
         "token_usage": token_usage,
     }

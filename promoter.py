@@ -39,8 +39,7 @@ def run_once(embedder=None):
     Uses batch embedding: fetches all pending pp texts, calls the embedder
     once with the full batch (OpenAI supports up to 2048 inputs per
     request), then passes the pre-computed embedding to each
-    `promote_pending` call. Dramatically faster than per-pp sequential
-    API calls (one round-trip instead of N).
+    `promote_pending` call. One HTTP round-trip instead of N.
     """
     conn = db.get_db()
     try:
@@ -49,13 +48,11 @@ def run_once(embedder=None):
         conn.close()
 
     if not ids:
-        return {"processed": 0, "dropped": 0, "linked": 0}
+        return {"processed": 0, "linked": 0}
 
     if embedder is None:
         embedder = OpenAIEmbedder()
 
-    # Batch-fetch texts and embeddings for every pending pp up front.
-    # This turns N sequential HTTP round-trips into ~ceil(N/256) batched ones.
     conn = db.get_db()
     try:
         rows = conn.execute(
@@ -77,27 +74,48 @@ def run_once(embedder=None):
     embeddings = embedder.embed_batch(texts)
     embedding_by_id = dict(zip(ordered_ids, embeddings))
 
-    dropped = 0
     linked = 0
-    for pp_id in ids:
-        emb = embedding_by_id.get(pp_id)
-        result = promote_pending(pp_id, embedder=embedder, embedding=emb)
-        if result is None:
-            dropped += 1
-        else:
+    lock_timeouts = 0
+    for pp_id in ordered_ids:
+        emb = embedding_by_id[pp_id]
+        try:
+            promote_pending(pp_id, embedder=embedder, embedding=emb)
             linked += 1
+        except TimeoutError as e:
+            # The category worker is mid-sweep holding the merge_lock.
+            # Skip this pp; it stays unmerged in the queue and the next
+            # promoter pass will pick it up. Don't kill the daemon.
+            lock_timeouts += 1
+            log.warning(
+                "promoter: merge_lock timeout on pp_id=%s (%s) — "
+                "leaving in queue for next pass", pp_id, e,
+            )
 
-    return {"processed": len(ids), "dropped": dropped, "linked": linked}
+    return {
+        "processed": len(ordered_ids),
+        "linked": linked,
+        "lock_timeouts": lock_timeouts,
+    }
 
 
 def run_forever(sleep_seconds=10):
-    """Long-running daemon loop. Drains the pending queue, sleeps, repeats."""
+    """Long-running daemon loop. Drains the pending queue, sleeps, repeats.
+
+    Catches per-pass exceptions so transient failures (lock timeouts,
+    embedding API errors, etc.) don't kill the daemon. Pending pps that
+    weren't promoted stay in the queue for the next pass.
+    """
     db.init_db()
     embedder = OpenAIEmbedder()
     while True:
-        summary = run_once(embedder=embedder)
-        if summary["processed"] > 0:
-            log.info("promoter pass: %s", summary)
+        try:
+            summary = run_once(embedder=embedder)
+            if summary["processed"] > 0:
+                log.info("promoter pass: %s", summary)
+        except Exception as e:
+            # Catch-all: the daemon must not die from a single bad pass.
+            log.exception("promoter: run_once raised %s — sleeping and retrying",
+                          type(e).__name__)
         time.sleep(sleep_seconds)
 
 

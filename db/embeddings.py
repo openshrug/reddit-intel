@@ -25,7 +25,10 @@ MERGE_COSINE_THRESHOLD = 0.60   # above this -> merge into existing painpoint
 #   same-topic LLM-condensed titles:     0.55-0.70 cosine sim (shorter, more formal)
 #   different topics:                    0.23-0.29 cosine sim
 # 0.60 catches LLM-condensed duplicates while keeping different topics clearly separate.
-CATEGORY_COSINE_THRESHOLD = 0.3  # below this for ALL categories -> Uncategorized
+CATEGORY_COSINE_THRESHOLD = 0.45  # below this for ALL categories -> Uncategorized
+# 0.45 sits clearly above the different-topics band (0.23-0.29) so
+# Uncategorized fires on genuinely novel painpoints rather than
+# rubber-stamping the nearest category from the noise floor.
 
 
 # ---------------------------------------------------------------------------
@@ -47,17 +50,23 @@ class OpenAIEmbedder:
 
     def _embed_with_retry(self, inputs, retries=2, backoff_base=4):
         """Call client.embeddings.create with exponential backoff on
-        transient errors. Matches the pattern in llm.py."""
+        transient errors. Acquires the shared OpenAI concurrency
+        semaphore (defined in llm.py) so embedding calls share the same
+        in-flight budget as completion calls."""
         import logging
         import time
+        from llm import OPENAI_API_SEMAPHORE
         log = logging.getLogger(__name__)
         client = self._get_client()
         last_exc = None
         for attempt in range(1 + retries):
             try:
-                return client.embeddings.create(
-                    model=EMBEDDING_MODEL, input=inputs
-                )
+                # Sleep between retries happens OUTSIDE the semaphore so
+                # backing-off threads don't hog a slot.
+                with OPENAI_API_SEMAPHORE:
+                    return client.embeddings.create(
+                        model=EMBEDDING_MODEL, input=inputs
+                    )
             except Exception as exc:
                 last_exc = exc
                 if attempt >= retries:
@@ -164,8 +173,19 @@ def init_vec_tables(conn):
 
 
 def _pack_embedding(embedding):
-    """Pack a list of floats into a BLOB for sqlite-vec."""
-    return struct.pack(f"{len(embedding)}f", *embedding)
+    """Pack a list of floats into a BLOB for sqlite-vec.
+
+    Asserts the dimension matches `EMBEDDING_DIM` so a wrong-shape
+    vector (model switch, caller bug) fails loudly here instead of
+    silently writing a malformed BLOB that get_painpoint_embedding
+    later returns None for — which would make the painpoint invisible
+    to downstream similarity search."""
+    if len(embedding) != EMBEDDING_DIM:
+        raise ValueError(
+            f"embedding dimension mismatch: got {len(embedding)}, "
+            f"expected {EMBEDDING_DIM} (check the embedding model)"
+        )
+    return struct.pack(f"{EMBEDDING_DIM}f", *embedding)
 
 
 def store_painpoint_embedding(conn, painpoint_id, embedding):
@@ -191,6 +211,79 @@ def store_category_embedding(conn, category_id, embedding):
         "INSERT INTO category_vec (rowid, embedding) VALUES (?, ?)",
         (category_id, blob),
     )
+
+
+def get_painpoint_embedding(conn, painpoint_id):
+    """Unpack a painpoint's embedding from painpoint_vec into a list of floats.
+    Returns None if the painpoint has no embedding row."""
+    row = conn.execute(
+        "SELECT embedding FROM painpoint_vec WHERE rowid = ?", (painpoint_id,)
+    ).fetchone()
+    if row is None:
+        return None
+    blob = row[0]
+    expected_bytes = EMBEDDING_DIM * 4
+    if len(blob) != expected_bytes:
+        return None
+    return list(struct.unpack(f"{EMBEDDING_DIM}f", blob))
+
+
+def iter_category_member_embeddings(conn, category_id):
+    """Yield (painpoint_id, embedding_list) for every member of a category
+    that has a valid embedding row. Skips rows with missing / wrong-size
+    blobs. Used by the reroute step to compute leave-one-out centroids."""
+    rows = conn.execute(
+        "SELECT p.id, v.embedding FROM painpoints p "
+        "JOIN painpoint_vec v ON v.rowid = p.id WHERE p.category_id = ?",
+        (category_id,),
+    ).fetchall()
+    expected_bytes = EMBEDDING_DIM * 4
+    for r in rows:
+        blob = r["embedding"]
+        if blob is None or len(blob) != expected_bytes:
+            continue
+        yield r["id"], list(struct.unpack(f"{EMBEDDING_DIM}f", blob))
+
+
+def leave_one_out_centroid_sim(member_embeddings, target_id, target_embedding):
+    """Cosine sim between a painpoint and the centroid of its category's
+    OTHER members. Returns None when the category has no other members
+    (singleton): caller should treat that as "no signal, always consider
+    rerouting away".
+
+    `member_embeddings` is a list of (pp_id, embedding) tuples — typically
+    everything from iter_category_member_embeddings for the painpoint's
+    current category. `target_id` / `target_embedding` identify the one to
+    leave out."""
+    accum = [0.0] * EMBEDDING_DIM
+    count = 0
+    for pp_id, emb in member_embeddings:
+        if pp_id == target_id:
+            continue
+        for i in range(EMBEDDING_DIM):
+            accum[i] += emb[i]
+        count += 1
+    if count == 0:
+        return None
+    norm = math.sqrt(sum(x * x for x in accum))
+    if norm == 0:
+        return None
+    centroid = [x / norm for x in accum]
+    return sum(a * b for a, b in zip(target_embedding, centroid))
+
+
+def find_best_category_ranked(conn, embedding, limit=50):
+    """KNN over category_vec, returning the top-K categories ranked by cosine
+    similarity DESC. Unlike find_best_category this returns the full ranked
+    list (no Uncategorized fallback, no bootstrap) — callers want to compare
+    similarities across multiple categories (e.g. reroute logic)."""
+    blob = _pack_embedding(embedding)
+    rows = conn.execute(
+        "SELECT rowid, distance FROM category_vec "
+        "WHERE embedding MATCH ? ORDER BY distance LIMIT ?",
+        (blob, limit),
+    ).fetchall()
+    return [(r[0], 1.0 - r[1]) for r in rows]
 
 
 def find_most_similar_painpoint(conn, embedding, exclude_ids=None):
@@ -224,21 +317,39 @@ def bootstrap_category_embeddings(conn, embedder):
     no member painpoints yet). As painpoints are added to categories, the
     embeddings get overwritten by the mean-of-members approach in
     update_category_embedding, which is strictly better.
+
+    Uses `embed_batch` so all categories embed in a single API round-trip
+    instead of N sequential ones (cold-start lock-hold drops from
+    ~N×200ms to ~300ms total).
     """
-    cats = conn.execute(
-        "SELECT id, name, description FROM categories WHERE name != 'Uncategorized'"
-    ).fetchall()
-    for cat in cats:
-        existing = conn.execute(
-            "SELECT rowid FROM category_vec WHERE rowid = ?", (cat["id"],)
-        ).fetchone()
-        if existing is not None:
-            continue
+    # Collect categories that need bootstrapping in one query.
+    rows = conn.execute("""
+        SELECT c.id, c.name, c.description
+        FROM categories c
+        LEFT JOIN category_vec cv ON cv.rowid = c.id
+        WHERE c.name != 'Uncategorized' AND cv.rowid IS NULL
+    """).fetchall()
+
+    pending = []
+    for cat in rows:
         text = f"{cat['name']} {cat['description'] or ''}".strip()
         if not text:
             continue
-        emb = embedder.embed(text)
-        store_category_embedding(conn, cat["id"], emb)
+        pending.append((cat["id"], text))
+
+    if not pending:
+        return
+
+    texts = [t for _, t in pending]
+    embeddings = embedder.embed_batch(texts)
+    if len(embeddings) != len(texts):
+        raise RuntimeError(
+            f"bootstrap_category_embeddings: embedder returned "
+            f"{len(embeddings)} vectors for {len(texts)} inputs — "
+            f"would silently mis-pair categories"
+        )
+    for (cat_id, _text), emb in zip(pending, embeddings):
+        store_category_embedding(conn, cat_id, emb)
 
 
 def find_best_category(conn, embedding, embedder=None):
@@ -282,15 +393,11 @@ def find_best_category(conn, embedding, embedder=None):
 
 
 def _uncategorized_id(conn):
-    """Resolve the Uncategorized sentinel category id."""
-    row = conn.execute(
-        "SELECT id FROM categories WHERE name = 'Uncategorized'"
-    ).fetchone()
-    if row is None:
-        raise RuntimeError(
-            "Uncategorized sentinel category missing -- db.init_db() not run?"
-        )
-    return row["id"]
+    """Local alias for db.uncategorized_id — kept private to avoid
+    a circular import at module load (db.__init__ imports nothing
+    from this module)."""
+    from . import uncategorized_id
+    return uncategorized_id(conn)
 
 
 def update_category_embedding(conn, category_id, embedder=None):
@@ -314,31 +421,27 @@ def update_category_embedding(conn, category_id, embedder=None):
         conn.execute("DELETE FROM category_vec WHERE rowid = ?", (category_id,))
         return
 
-    # Get all painpoint embeddings for this category
-    member_ids = conn.execute(
-        "SELECT id FROM painpoints WHERE category_id = ?",
-        (category_id,),
-    ).fetchall()
+    # Pull every member's embedding in a single JOIN — was a per-member
+    # SELECT (N+1) before; now one round-trip regardless of category size.
+    expected_bytes = EMBEDDING_DIM * 4  # float32 = 4 bytes
+    rows = conn.execute("""
+        SELECT pv.rowid AS pp_id, pv.embedding
+        FROM painpoint_vec pv
+        JOIN painpoints p ON p.id = pv.rowid
+        WHERE p.category_id = ?
+    """, (category_id,)).fetchall()
 
-    if not member_ids:
+    if not rows:
         conn.execute(
             "DELETE FROM category_vec WHERE rowid = ?", (category_id,)
         )
         return
 
-    # Collect embeddings from painpoint_vec
-    expected_bytes = EMBEDDING_DIM * 4  # float32 = 4 bytes
     accum = [0.0] * EMBEDDING_DIM
     count = 0
-    for row in member_ids:
-        pp_id = row["id"]
-        vec_row = conn.execute(
-            "SELECT embedding FROM painpoint_vec WHERE rowid = ?",
-            (pp_id,),
-        ).fetchone()
-        if vec_row is None:
-            continue
-        blob = vec_row[0]
+    for row in rows:
+        pp_id = row["pp_id"]
+        blob = row["embedding"]
         if len(blob) != expected_bytes:
             # Dimension mismatch (stale embedding from a different model).
             # Skip this painpoint rather than crash the whole centroid calc.

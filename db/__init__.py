@@ -5,19 +5,35 @@ from pathlib import Path
 DB_PATH = Path(__file__).parents[1] / "trends.db"
 SCHEMA_FILE = Path(__file__).parent / "schema.sql"
 
+# Canonical name + lookup for the Uncategorized sentinel category.
+# Defined here to avoid drift across db/painpoints.py, db/embeddings.py,
+# db/category_events.py — they all used to redefine these.
+UNCATEGORIZED_NAME = "Uncategorized"
 
-# Painpoint ingest pipeline migrations (see docs/PAINPOINT_INGEST_PLAN.md §7).
+
+def uncategorized_id(conn):
+    """Resolve the Uncategorized sentinel category id. Cached in
+    sqlite3.Connection.row_factory's local memo would be nicer but
+    sqlite3.Connection isn't subscriptable; the SELECT is one
+    indexed lookup, fast enough."""
+    row = conn.execute(
+        "SELECT id FROM categories WHERE name = ?", (UNCATEGORIZED_NAME,)
+    ).fetchone()
+    if row is None:
+        raise RuntimeError(
+            "Uncategorized sentinel category missing — db.init_db() not run?"
+        )
+    return row["id"]
+
+
+# Painpoint ingest pipeline migrations.
 # Each entry is an idempotent ALTER TABLE; we run them via a try/except for
 # "duplicate column name" because SQLite has no ADD COLUMN IF NOT EXISTS.
+# Kept as a list (not dropped) because existing DBs still have the legacy
+# `relevance`, `relevance_updated_at`, `last_split_check_at` columns —
+# leaving them in place is a no-op; we just don't read/write them anymore.
 _MIGRATIONS = [
-    # §7.1: cache relevance on the painpoint row
-    "ALTER TABLE painpoints ADD COLUMN relevance REAL",
-    "ALTER TABLE painpoints ADD COLUMN relevance_updated_at TEXT",
-    # §7.3: (removed — minhash_blob replaced by sqlite-vec embeddings)
-    # §7.4: split-check trigger discipline
-    "ALTER TABLE categories ADD COLUMN last_split_check_at TEXT",
     "ALTER TABLE categories ADD COLUMN painpoint_count_at_last_check INTEGER DEFAULT 0",
-    # §7.7: (removed — signal_score and derived columns dropped in v3)
 ]
 
 
@@ -79,3 +95,26 @@ def init_db():
     )
     conn.commit()
     conn.close()
+
+    # Eagerly bootstrap category embeddings if an OPENAI_API_KEY is set.
+    # Done OUTSIDE the merge_lock so the first promote_pending doesn't
+    # eat a multi-second OpenAI HTTP round-trip while holding the lock.
+    # Skips silently if no key (tests, fresh checkouts).
+    import os
+    if os.environ.get("OPENAI_API_KEY"):
+        try:
+            from .embeddings import OpenAIEmbedder, bootstrap_category_embeddings
+            conn = get_db()
+            try:
+                bootstrap_category_embeddings(conn, OpenAIEmbedder())
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception as e:
+            # Don't fail init_db if bootstrap has issues — the worker
+            # will fall back to inline bootstrap on first promote.
+            import logging
+            logging.getLogger(__name__).warning(
+                "init_db: eager category-embedding bootstrap failed (%s) — "
+                "first promote will bootstrap inline instead", e,
+            )

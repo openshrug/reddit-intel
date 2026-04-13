@@ -24,7 +24,7 @@ from db.painpoints import (
     save_pending_painpoint,
     add_pending_source,
 )
-from db.relevance import compute_pending_relevance, MIN_RELEVANCE_TO_PROMOTE
+from db.relevance import per_source_relevance
 from db.embeddings import OpenAIEmbedder
 from db.llm_naming import LLMNamer
 from db.locks import merge_lock
@@ -57,9 +57,9 @@ def _seed_pp_in_cat(cat_id, title, severity, age_days=1, score=300):
         now = db._now()
         conn.execute(
             "INSERT INTO painpoints (title, description, severity, signal_count, "
-            "category_id, first_seen, last_updated, relevance, relevance_updated_at) "
-            "VALUES (?, '', ?, 1, ?, ?, ?, ?, ?)",
-            (title, severity, cat_id, now, now, 7.0, now),
+            "category_id, first_seen, last_updated) "
+            "VALUES (?, '', ?, 1, ?, ?, ?)",
+            (title, severity, cat_id, now, now),
         )
         new_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         conn.execute(
@@ -103,18 +103,28 @@ class TestLiveEndToEnd:
         # ==============================================================
         print("\n--- 1. Relevance drop ---")
 
+        # Relevance-based drop was removed; every pending promotes. Print
+        # the per-source relevance for inspection only.
+        def _rel_for(post_id, sev):
+            conn = db.get_db()
+            try:
+                p = conn.execute("SELECT * FROM posts WHERE id = ?", (post_id,)).fetchone()
+                return per_source_relevance(p, None, severity=sev)
+            finally:
+                conn.close()
+
         ancient = _post("t3_ancient", score=0, num_comments=0,
                         created_utc=time.time() - 365 * 86400)
         pp_ancient = save_pending_painpoint(ancient, "Ancient irrelevant complaint", severity=1)
-        rel = compute_pending_relevance(pp_ancient)
         result = promote_pending(pp_ancient, embedder=embedder)
-        print(f"  Ancient (rel={rel:.4f}): {'DROPPED' if result is None else 'KEPT'}")
+        print(f"  Ancient (rel={_rel_for(ancient, 1):.4f}): "
+              f"{'DROPPED' if result is None else f'KEPT → painpoint #{result}'}")
 
         fresh = _post("t3_fresh", score=500, num_comments=200)
         pp_fresh = save_pending_painpoint(fresh, "Fresh hot complaint about API latency", severity=9)
-        rel = compute_pending_relevance(pp_fresh)
         result = promote_pending(pp_fresh, embedder=embedder)
-        print(f"  Fresh   (rel={rel:.4f}): {'DROPPED' if result is None else f'KEPT → painpoint #{result}'}")
+        print(f"  Fresh   (rel={_rel_for(fresh, 9):.4f}): "
+              f"{'DROPPED' if result is None else f'KEPT → painpoint #{result}'}")
 
         # ==============================================================
         # 2. EMBEDDING MERGE — similar painpoints collapse
@@ -238,12 +248,18 @@ class TestLiveEndToEnd:
             pp_id = save_pending_painpoint(pid, f"Ancient legacy issue {i}", severity=1)
             _seed_pp_in_cat(dead_id, f"Ancient legacy issue {i}", 1,
                             age_days=200, score=2)
-            # Override relevance to near-zero
+            # Backdate last_updated so the staleness-based delete sweep fires.
+            from datetime import datetime, timedelta, timezone
+            from db.category_events import CATEGORY_STALE_DAYS
+            stale_ts = (
+                datetime.now(timezone.utc)
+                - timedelta(days=CATEGORY_STALE_DAYS + 5)
+            ).isoformat()
             conn = db.get_db()
             try:
                 conn.execute(
-                    "UPDATE painpoints SET relevance = 0.001, relevance_updated_at = datetime('now') "
-                    "WHERE category_id = ?", (dead_id,))
+                    "UPDATE painpoints SET last_updated = ? "
+                    "WHERE category_id = ?", (stale_ts, dead_id))
                 conn.commit()
             finally:
                 conn.close()

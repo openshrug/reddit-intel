@@ -18,6 +18,16 @@ log = logging.getLogger(__name__)
 
 from db.queries import run_sql
 
+# Global cap on concurrent OpenAI API calls across the whole process.
+# OpenAI tier-1 limits are 3000 RPM for embeddings (~50 RPS) and ~500 RPM
+# for nano-class models. With ~200ms per embedding call and ~3s per
+# completion, ~10 in flight stays comfortably below the per-second cap
+# (≈ rpm/2 / typical_rps ≈ 25/2 ≈ 12, picked 10 as a safer bound).
+# Both `llm_call` (here) and `OpenAIEmbedder._embed_with_retry` (in
+# db/embeddings.py) acquire this semaphore so all paths share one budget.
+OPENAI_CONCURRENCY = 10
+OPENAI_API_SEMAPHORE = threading.BoundedSemaphore(OPENAI_CONCURRENCY)
+
 
 def is_debug():
     return os.environ.get("AIPULSE_DEBUG") == "1"
@@ -175,7 +185,11 @@ def llm_call(client, instructions, input, *, max_tokens=4000,
     last_exc = None
     for attempt in range(1 + retries):
         try:
-            return _do_call()
+            # Acquire the global API concurrency semaphore around the
+            # network call. Sleeps between retries happen WITHOUT holding
+            # the slot so retrying threads don't starve fresh callers.
+            with OPENAI_API_SEMAPHORE:
+                return _do_call()
         except Exception as exc:
             last_exc = exc
             if attempt >= retries:

@@ -54,7 +54,7 @@ def _components(items, edges):
     return list(groups.values())
 
 
-def cluster_painpoints(painpoints, threshold=0.40, embedder=None):
+def cluster_painpoints(painpoints, threshold=0.40, embedder=None, conn=None):
     """Group a list of painpoint dicts into clusters by embedding similarity.
 
     Each painpoint must have `id`, `title`, and `description` fields. Two
@@ -62,6 +62,12 @@ def cluster_painpoints(painpoints, threshold=0.40, embedder=None):
     `threshold`. Returns a list of clusters, each a list of painpoint dicts.
 
     Singletons are returned as 1-element clusters.
+
+    If `conn` is provided, **prefers stored embeddings** from
+    `painpoint_vec` over re-computing via the embedder. Falls back to
+    the embedder for painpoints without a stored vector. Avoids the
+    expensive re-embedding pass that dominated cluster_painpoints
+    runtime at scale.
     """
     if not painpoints:
         return []
@@ -71,11 +77,32 @@ def cluster_painpoints(painpoints, threshold=0.40, embedder=None):
     if embedder is None:
         embedder = FakeEmbedder()
 
-    # Compute embeddings for each painpoint
+    # Try to bulk-load existing embeddings from painpoint_vec.
+    cached = {}
+    if conn is not None:
+        ids = [p["id"] for p in painpoints]
+        rows = conn.execute(
+            f"SELECT rowid, embedding FROM painpoint_vec "
+            f"WHERE rowid IN ({','.join('?' * len(ids))})",
+            ids,
+        ).fetchall()
+        expected_bytes = EMBEDDING_DIM * 4
+        for r in rows:
+            blob = r[1]
+            if len(blob) == expected_bytes:
+                try:
+                    cached[r[0]] = list(struct.unpack(f"{EMBEDDING_DIM}f", blob))
+                except struct.error:
+                    pass  # treat as missing, fall back to embedder
+
+    # Compute embeddings for each painpoint, preferring cached.
     sigs = {}
     for p in painpoints:
-        text = f"{p['title']} {p.get('description') or ''}".strip()
-        sigs[p["id"]] = embedder.embed(text)
+        if p["id"] in cached:
+            sigs[p["id"]] = cached[p["id"]]
+        else:
+            text = f"{p['title']} {p.get('description') or ''}".strip()
+            sigs[p["id"]] = embedder.embed(text)
 
     edges = []
     ids = list(sigs.keys())
