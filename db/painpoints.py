@@ -1,8 +1,18 @@
 import logging
 import sqlite3
 
-from . import get_db, _now, UNCATEGORIZED_NAME, uncategorized_id
+from . import get_db, _now, UNCATEGORIZED_NAME, in_clause_placeholders, uncategorized_id
 from .categories import get_category_id_by_name
+from .embeddings import (
+    MERGE_COSINE_THRESHOLD,
+    OpenAIEmbedder,
+    add_member_to_centroid,
+    find_best_category,
+    find_most_similar_painpoint,
+    store_painpoint_embedding,
+    update_category_embedding,
+)
+from .locks import merge_lock
 
 log = logging.getLogger(__name__)
 
@@ -93,7 +103,7 @@ def save_pending_painpoints_batch(items):
             r[0]
             for r in conn.execute(
                 f"SELECT id FROM posts WHERE id IN "
-                f"({','.join('?' * len(wanted_post_ids))})",
+                f"({in_clause_placeholders(len(wanted_post_ids))})",
                 list(wanted_post_ids),
             ).fetchall()
         }
@@ -108,7 +118,7 @@ def save_pending_painpoints_batch(items):
                 r[0]
                 for r in conn.execute(
                     f"SELECT id FROM comments WHERE id IN "
-                    f"({','.join('?' * len(wanted_comment_ids))})",
+                    f"({in_clause_placeholders(len(wanted_comment_ids))})",
                     list(wanted_comment_ids),
                 ).fetchall()
             }
@@ -242,12 +252,6 @@ def _create_painpoint_from_pending(conn, pending_id, embedding, embedder=None):
             "the same pain would create a duplicate"
         )
 
-    from .embeddings import (
-        find_best_category,
-        store_painpoint_embedding,
-        update_category_embedding,
-    )
-
     pending = conn.execute(
         "SELECT id, title, description, severity FROM pending_painpoints WHERE id = ?",
         (pending_id,),
@@ -273,9 +277,11 @@ def _create_painpoint_from_pending(conn, pending_id, embedding, embedder=None):
         (new_id, pending_id),
     )
 
-    # Store embedding + refresh the target category's centroid (it
-    # gained a new member).
+    # Store embedding + increment the category's cached member sum so
+    # the next update_category_embedding is O(1). Then refresh the
+    # blended category_vec so find_best_category sees the new state.
     store_painpoint_embedding(conn, new_id, embedding)
+    add_member_to_centroid(conn, category_id, embedding)
     update_category_embedding(conn, category_id)
 
     return new_id
@@ -325,14 +331,7 @@ def promote_pending(pending_id, *, embedder=None, embedding=None, now=None):
     Returns the painpoints.id the pending pp was attached to.
     """
     del now  # accepted for API compatibility
-    from .embeddings import (
-        MERGE_COSINE_THRESHOLD,
-        find_most_similar_painpoint,
-    )
-    from .locks import merge_lock
-
     if embedder is None:
-        from .embeddings import OpenAIEmbedder
         embedder = OpenAIEmbedder()
 
     if embedding is None:

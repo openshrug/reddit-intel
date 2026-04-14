@@ -10,26 +10,45 @@ import logging
 import time
 
 import db
+from db import in_clause_placeholders
 from db.painpoints import promote_pending
 from db.embeddings import OpenAIEmbedder
 
 log = logging.getLogger(__name__)
 
 
-def pick_unmerged_pending(conn, limit=100):
+def pick_unmerged_pending(conn, limit=None):
     """Find pending painpoints that haven't been linked into the merged
-    table yet."""
-    rows = conn.execute(
-        """
-        SELECT pp.id
-        FROM pending_painpoints pp
-        LEFT JOIN painpoint_sources ps ON ps.pending_painpoint_id = pp.id
-        WHERE ps.painpoint_id IS NULL
-        ORDER BY pp.id
-        LIMIT ?
-        """,
-        (limit,),
-    ).fetchall()
+    table yet.
+
+    `limit=None` drains the full queue in one call. The previous 100-cap
+    left ~40% of pendings orphaned per E2E pass with the relaxed
+    extraction prompt (4× more BuildToAttract / rSocialskills output);
+    a full drain keeps the test honest and doesn't depend on a separate
+    promoter daemon running. Callers that want a cap can still pass one.
+    """
+    if limit is None:
+        rows = conn.execute(
+            """
+            SELECT pp.id
+            FROM pending_painpoints pp
+            LEFT JOIN painpoint_sources ps ON ps.pending_painpoint_id = pp.id
+            WHERE ps.painpoint_id IS NULL
+            ORDER BY pp.id
+            """
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            SELECT pp.id
+            FROM pending_painpoints pp
+            LEFT JOIN painpoint_sources ps ON ps.pending_painpoint_id = pp.id
+            WHERE ps.painpoint_id IS NULL
+            ORDER BY pp.id
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
     return [r["id"] for r in rows]
 
 
@@ -57,7 +76,7 @@ def run_once(embedder=None):
     try:
         rows = conn.execute(
             f"SELECT id, title, description FROM pending_painpoints "
-            f"WHERE id IN ({','.join('?' * len(ids))})",
+            f"WHERE id IN ({in_clause_placeholders(len(ids))})",
             ids,
         ).fetchall()
     finally:

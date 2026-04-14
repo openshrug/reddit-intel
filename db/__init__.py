@@ -34,11 +34,38 @@ def uncategorized_id(conn):
 # leaving them in place is a no-op; we just don't read/write them anymore.
 _MIGRATIONS = [
     "ALTER TABLE categories ADD COLUMN painpoint_count_at_last_check INTEGER DEFAULT 0",
+    # Incremental-centroid state: we keep (sum_of_member_embeddings, count)
+    # on the category row so update_category_embedding is O(1) instead of
+    # JOIN-and-average-all-members on every mutation.
+    "ALTER TABLE categories ADD COLUMN member_emb_sum_blob BLOB",
+    "ALTER TABLE categories ADD COLUMN member_emb_count INTEGER NOT NULL DEFAULT 0",
+    # When the category's MEMBER SET last changed (add / remove / move),
+    # dedicated from painpoints.last_updated which also fires on
+    # signal_count bumps — using MAX(last_updated) conflated "real
+    # membership activity" with "duplicate-pending bumps".
+    "ALTER TABLE categories ADD COLUMN member_set_last_changed_at TEXT",
+    # When the category's centroid was last rewritten — used by the
+    # reroute step to skip painpoints whose current category centroid
+    # hasn't moved since they were last re-checked.
+    "ALTER TABLE categories ADD COLUMN centroid_updated_at TEXT",
+    # When this painpoint was last reroute-checked; skip re-checking if
+    # nothing relevant has changed since.
+    "ALTER TABLE painpoints ADD COLUMN reroute_checked_at TEXT",
 ]
 
 
 def _now():
     return datetime.now(timezone.utc).isoformat()
+
+
+def in_clause_placeholders(n):
+    """Build the `?,?,...` placeholder string for a SQL `IN (...)` clause.
+    Centralised so ad-hoc `','.join('?' * len(ids))` patterns don't drift;
+    callers still bind the values themselves.
+    """
+    if n <= 0:
+        raise ValueError(f"in_clause_placeholders needs n >= 1, got {n}")
+    return ",".join("?" * n)
 
 
 def get_db():

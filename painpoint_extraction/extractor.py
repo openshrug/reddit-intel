@@ -44,23 +44,31 @@ class ExtractionResult(BaseModel):
 # --- Instructions ---
 
 EXTRACT_INSTRUCTIONS = """\
-You are a painpoint extraction engine for developer-tool product research. \
-You will receive Reddit posts with their comments. Your job is to identify \
-user painpoints that a developer could build a product or tool around.
+You are a painpoint extraction engine for product research. You will \
+receive Reddit posts with their comments. Your job is to identify user \
+painpoints that someone could build a product, app, or service around — \
+ideally one with viral / mass-appeal potential, not just developer tools.
 
-Focus on painpoints that are:
-- ACTIONABLE: someone could build an app, tool, extension, API, or service \
-to solve this problem.
-- SPECIFIC: a concrete workflow friction, missing feature, or broken \
-experience — not a vague complaint or social commentary.
-- TECHNICAL: related to software development, tooling, infrastructure, \
-developer workflow, or developer experience.
+Keep painpoints that meet BOTH of these:
+- APP-ADDRESSABLE: a mobile app, web app, browser extension, API, or \
+small service could plausibly solve or ease this pain. The solution \
+doesn't have to be technical itself — a content app, matching app, \
+tracker, social tool, or consumer utility all count.
+- SPECIFIC: a concrete friction, missing feature, broken experience, or \
+unmet need — not a vague opinion or abstract commentary.
+
+Bias toward KEEPING painpoints with viral / mass-market potential: \
+consumer frustrations, social/dating/relationship friction that a product \
+could ease, lifestyle and habit pains, creator/marketing workflow \
+struggles, etc. Non-technical pains are welcome if a product could \
+address them.
 
 Skip painpoints that are:
 - Pure opinions, memes, jokes, or sarcasm with no real pain behind them.
-- Pricing/business model complaints (unless they reveal a feature gap).
-- Social/career anxieties (e.g. "AI will take our jobs").
-- Platform politics or company drama.
+- Philosophical or political takes with no product hook ("AI will take our \
+jobs", "society is broken").
+- Pure pricing/business-model complaints (unless they reveal a feature gap).
+- Company drama / platform politics with no product angle.
 
 Rules:
 - A single post/comment may contain zero, one, or many painpoints.

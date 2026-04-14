@@ -18,6 +18,7 @@ from db.category_events import (
     propose_reroute_events,
     propose_split_events,
     propose_uncategorized_events,
+    propose_uncategorized_singleton_events,
 )
 from db.embeddings import FakeEmbedder
 from db.llm_naming import LLMNamer
@@ -46,17 +47,18 @@ def run_sweep(namer=None, embedder=None):
         embedder = FakeEmbedder()
 
     summary = {
-        "uncategorized": {"proposed": 0, "accepted": 0},
-        "split":         {"proposed": 0, "accepted": 0},
-        "delete":        {"proposed": 0, "accepted": 0},
-        "merge":         {"proposed": 0, "accepted": 0},
-        "reroute":       {"proposed": 0, "accepted": 0},
+        "uncategorized":        {"proposed": 0, "accepted": 0},
+        "uncat_llm_review":     {"proposed": 0, "accepted": 0},
+        "split":                {"proposed": 0, "accepted": 0},
+        "delete":               {"proposed": 0, "accepted": 0},
+        "merge":                {"proposed": 0, "accepted": 0},
+        "reroute":              {"proposed": 0, "accepted": 0},
     }
 
     conn = db.get_db()
     try:
         with merge_lock(conn, timeout=WORKER_LOCK_TIMEOUT_SEC):
-            # Step 1 -- process Uncategorized
+            # Step 1 -- process Uncategorized via clustering
             # Batch: propose all events, fan out LLM naming calls in
             # parallel via ThreadPoolExecutor, then apply sequentially.
             # Turns N×(2-3s serial LLM calls) into ~(N/5)×wall-clock.
@@ -64,20 +66,32 @@ def run_sweep(namer=None, embedder=None):
             prefetch_llm_batch(conn, uncat_events, namer)
             for event in uncat_events:
                 summary["uncategorized"]["proposed"] += 1
-                if apply_with_test(conn, event, namer):
+                if apply_with_test(conn, event, namer, embedder=embedder):
                     summary["uncategorized"]["accepted"] += 1
+
+            # Step 1b -- LLM review of remaining Uncategorized singletons.
+            # llm_result is pre-populated inside the proposer, so no
+            # prefetch is needed here — _apply_add_category_new uses the
+            # pre-fetched response directly.
+            review_events = list(propose_uncategorized_singleton_events(
+                conn, namer=namer, embedder=embedder,
+            ))
+            for event in review_events:
+                summary["uncat_llm_review"]["proposed"] += 1
+                if apply_with_test(conn, event, namer, embedder=embedder):
+                    summary["uncat_llm_review"]["accepted"] += 1
 
             # Step 2 -- split crowded categories (LLM-decided in propose,
             # no LLM call in apply — nothing to prefetch here).
             for event in list(propose_split_events(conn, embedder=embedder, namer=namer)):
                 summary["split"]["proposed"] += 1
-                if apply_with_test(conn, event, namer):
+                if apply_with_test(conn, event, namer, embedder=embedder):
                     summary["split"]["accepted"] += 1
 
             # Step 3 -- delete dead categories (no LLM call in apply)
             for event in list(propose_delete_events(conn)):
                 summary["delete"]["proposed"] += 1
-                if apply_with_test(conn, event, namer):
+                if apply_with_test(conn, event, namer, embedder=embedder):
                     summary["delete"]["accepted"] += 1
 
             # Step 4 -- merge duplicate sibling categories
@@ -87,7 +101,7 @@ def run_sweep(namer=None, embedder=None):
             prefetch_llm_batch(conn, merge_events, namer)
             for event in merge_events:
                 summary["merge"]["proposed"] += 1
-                if apply_with_test(conn, event, namer):
+                if apply_with_test(conn, event, namer, embedder=embedder):
                     summary["merge"]["accepted"] += 1
 
             # Step 5 -- per-painpoint reroute (no LLM calls, pure embedding).
@@ -95,7 +109,7 @@ def run_sweep(namer=None, embedder=None):
             # Must run AFTER merges so the target centroids reflect final state.
             for event in list(propose_reroute_events(conn, embedder=embedder)):
                 summary["reroute"]["proposed"] += 1
-                if apply_with_test(conn, event, namer):
+                if apply_with_test(conn, event, namer, embedder=embedder):
                     summary["reroute"]["accepted"] += 1
     finally:
         conn.close()

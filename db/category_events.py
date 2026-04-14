@@ -9,8 +9,10 @@ passed (per §5.4 — savepoints protect against mid-apply failures, NOT
 against test rejection, because every test is pre-mutation).
 """
 
+import concurrent.futures as _cf
 import json
 import logging
+import sqlite3
 from dataclasses import dataclass
 from typing import Optional
 
@@ -24,11 +26,32 @@ from .category_clustering import (
     category_member_titles,
     inter_category_similarity,
 )
-from . import UNCATEGORIZED_NAME, uncategorized_id
-from .embeddings import MERGE_COSINE_THRESHOLD, update_category_embedding
+from . import UNCATEGORIZED_NAME, in_clause_placeholders, uncategorized_id
+from .embeddings import (
+    MERGE_COSINE_THRESHOLD,
+    add_member_to_centroid,
+    delete_category_anchor,
+    find_best_category_ranked,
+    get_painpoint_embedding,
+    iter_category_member_embeddings,
+    leave_one_out_centroid_sim,
+    rebuild_centroid_from_members,
+    remove_member_from_centroid,
+    store_category_anchor,
+    update_category_embedding,
+)
 from .relevance import _parse_iso
 
-MIN_SUB_CLUSTER_SIZE = 5
+MIN_SUB_CLUSTER_SIZE = 3
+# Maximum fan-out for parallel LLM calls (prefetch + decide_split +
+# uncat-review). Capped below the global OPENAI_CONCURRENCY=10 so we
+# don't monopolise the semaphore if extraction is still running.
+_LLM_PARALLEL_WORKERS = 5
+# Lowered from 5 after a live-sweep pass over 145 Uncategorized
+# members fired 0 add_category_new events: clusters of 3-4 related
+# painpoints (screenshot tooling, paywall design, etc.) sat just below
+# the old floor. 3 still excludes singletons/pairs that would name a
+# category over noise.
 SPLIT_RECHECK_DELTA = 10
 MERGE_CATEGORY_THRESHOLD = 0.80
 # A category with no member added/updated in this many days is stale —
@@ -79,12 +102,25 @@ def _uncategorized_id(conn):
         return None
 
 
+# How many Uncategorized singletons the LLM reviews per sweep. Bounds
+# cost (one gpt-4.1-mini call per reviewed painpoint) while still
+# making meaningful progress on the queue. Prioritised by
+# signal_count × severity so we look at the loudest painpoints first.
+# Raised from 20 → 50 after the relaxed extraction prompt pushed
+# Uncategorized past 160 painpoints — at 20 we only touch the very top;
+# 50 lets the LLM bootstrap new non-tech roots (dating, fitness,
+# lifestyle) faster. Cost: ~$0.05 per sweep at gpt-4.1-mini rates.
+MAX_UNCAT_LLM_REVIEWS = 50
+
+
 def propose_uncategorized_events(conn, embedder=None):
     """Step 1: cluster the Uncategorized bucket via embedding cosine sim,
     yield one `add_category_new` event per cluster of size >=
     MIN_SUB_CLUSTER_SIZE.
 
-    Singletons stay in Uncategorized waiting for siblings to arrive.
+    Singletons stay in Uncategorized waiting for siblings to arrive
+    (or for the LLM-review pass to promote them — see
+    propose_uncategorized_singleton_events below).
     """
     uncat_id = _uncategorized_id(conn)
     if uncat_id is None:
@@ -114,6 +150,124 @@ def propose_uncategorized_events(conn, embedder=None):
             metric_name="cluster_size",
             metric_value=float(len(cluster)),
             threshold=float(MIN_SUB_CLUSTER_SIZE),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Step 1b — LLM review of remaining Uncategorized singletons
+# ---------------------------------------------------------------------------
+
+
+def propose_uncategorized_singleton_events(
+    conn, namer=None, embedder=None, max_reviews=MAX_UNCAT_LLM_REVIEWS,
+):
+    """For Uncategorized painpoints that weren't swept into a cluster,
+    ask the LLM whether each warrants its own category. Emits
+    `add_category_new` events for `create` decisions (with llm_result
+    pre-populated so the apply step skips the redundant naming call).
+
+    Prioritised by `signal_count × severity` — highest-signal Uncat
+    painpoints get reviewed first. Capped by `max_reviews` so cost
+    stays bounded (~$0.02 per sweep at gpt-4.1-mini rates).
+
+    Painpoints that ended up in a qualifying cluster (Step 1) are
+    excluded — we don't double-review painpoints already being
+    promoted via clustering.
+    """
+    if namer is None:
+        from .llm_naming import LLMNamer
+        namer = LLMNamer()
+
+    uncat_id = _uncategorized_id(conn)
+    if uncat_id is None:
+        return
+
+    # Work out which Uncat painpoints already got picked up by clustering
+    # this sweep — easier to recompute clusters locally than thread the
+    # result through, and the clustering pass is cheap against
+    # painpoint_vec.
+    all_members = [
+        dict(r) for r in conn.execute(
+            "SELECT id, title, description, severity, signal_count "
+            "FROM painpoints WHERE category_id = ?",
+            (uncat_id,),
+        ).fetchall()
+    ]
+    if not all_members:
+        return
+
+    clusters = cluster_painpoints(
+        all_members, threshold=MERGE_COSINE_THRESHOLD,
+        embedder=embedder, conn=conn,
+    )
+    clustered_ids = {
+        p["id"] for cluster in clusters if len(cluster) >= MIN_SUB_CLUSTER_SIZE
+        for p in cluster
+    }
+
+    singletons = [m for m in all_members if m["id"] not in clustered_ids]
+    if not singletons:
+        return
+
+    # Prioritise by signal * severity. Null severity defaults to 5
+    # (historical data; shouldn't happen with the hardened save path).
+    def _priority(m):
+        return (m["signal_count"] or 1) * (m["severity"] or 5)
+    singletons.sort(key=_priority, reverse=True)
+    batch = singletons[:max_reviews]
+
+    _roots, flat = _get_taxonomy_for_llm(conn)
+
+    # Fan out the LLM calls in parallel. Each call is independent; the
+    # per-painpoint decision doesn't depend on the others.
+    decisions, _errors = parallel_namer_calls(
+        (
+            m["id"],
+            (lambda m=m: namer.decide_uncategorized(
+                m["title"], m["description"] or "",
+                m["signal_count"] or 1, m["severity"] or 5,
+                flat,
+            )),
+        )
+        for m in batch
+    )
+
+    for m in batch:
+        decision = decisions.get(m["id"])
+        if decision is None:
+            continue
+        if decision.action != "create":
+            continue
+        name = (decision.name or "").strip()
+        desc = (decision.description or "").strip()
+        parent = (decision.parent or "").strip() or None
+        if not name or not desc:
+            log.warning(
+                "uncat-review: LLM said create for pp=%s but omitted "
+                "name/description — skipping", m["id"],
+            )
+            continue
+
+        yield CategoryEvent(
+            event_type="add_category_new",
+            payload={
+                "painpoint_ids": [m["id"]],
+                "sample_titles": [m["title"]],
+                "sample_descriptions": [m["description"] or ""],
+            },
+            target_category=uncat_id,
+            triggering_pp=m["id"],
+            metric_name="uncat_llm_review",
+            metric_value=float(_priority(m)),
+            threshold=0.0,
+            # Pre-populate the llm_result so _apply_add_category_new
+            # reuses this decision instead of making a fresh naming
+            # call inside the savepoint.
+            llm_result={
+                "name": name,
+                "description": desc,
+                "parent": parent,
+            },
         )
 
 
@@ -197,7 +351,7 @@ def propose_split_events(conn, embedder=None, namer=None):
     # Phase 2 (parallel, no DB): fan out decide_split LLM calls across
     # all candidates. Cap concurrency at 5 — the global semaphore in
     # llm.py provides additional process-wide ceiling.
-    decisions = parallel_namer_calls(
+    decisions, _errors = parallel_namer_calls(
         (
             cand["cat"]["id"],
             (lambda c=cand: namer.decide_split(
@@ -288,20 +442,36 @@ def propose_split_events(conn, embedder=None, namer=None):
 
 
 def _category_last_activity(conn, category_id):
-    """Max `painpoints.last_updated` across a category's current members.
+    """When this category's MEMBER SET last changed (add / remove / move).
 
-    Returns a timezone-aware UTC datetime, or None if the category has no
-    members. `last_updated` fires whenever a painpoint is created, moved,
-    or linked to a new pending source — it's the right proxy for "when
-    did this category last see a membership event."
+    Reads `categories.member_set_last_changed_at` — a dedicated stamp
+    bumped only by the incremental-centroid helpers. Using
+    MAX(painpoints.last_updated) conflated "real membership activity"
+    with "duplicate-pending bumps" (signal_count ++ fires last_updated
+    but doesn't change the member set), so a spam of repeat hits could
+    keep a semantically dead category looking fresh.
+
+    Returns a timezone-aware UTC datetime, or None if the category has
+    no members (category row exists but member_set_last_changed_at is
+    NULL). Falls back to the old MAX(last_updated) signal only when the
+    dedicated stamp is NULL *and* there are members — handles legacy
+    DBs where the migration ran but no mutation has touched this
+    category yet.
     """
     row = conn.execute(
+        "SELECT member_set_last_changed_at FROM categories WHERE id = ?",
+        (category_id,),
+    ).fetchone()
+    if row is not None and row["member_set_last_changed_at"]:
+        return _parse_iso(row["member_set_last_changed_at"])
+
+    fallback = conn.execute(
         "SELECT MAX(last_updated) AS ts FROM painpoints WHERE category_id = ?",
         (category_id,),
     ).fetchone()
-    if row is None or row["ts"] is None:
+    if fallback is None or fallback["ts"] is None:
         return None
-    return _parse_iso(row["ts"])
+    return _parse_iso(fallback["ts"])
 
 
 def propose_delete_events(conn, now=None):
@@ -420,28 +590,43 @@ def _test_delete_category(conn, event):
 
 
 def propose_reroute_events(conn, embedder=None):
-    """Step 5: for every categorised painpoint, find its best-matching
-    category by embedding cosine. If that category differs from the current
-    one by at least REROUTE_MARGIN, propose a reroute.
+    """Step 5: for every categorised painpoint that needs re-checking,
+    find its best-matching category by embedding cosine; propose a
+    reroute if the alternative beats current by at least REROUTE_MARGIN.
+
+    Skip rule (scales O(N_pps × K_cats) → O(changed_pps × K_cats)):
+    a painpoint is safe to skip when all three hold:
+      - it has been reroute-checked at least once (`reroute_checked_at`
+        is not NULL),
+      - its own state hasn't moved since that check
+        (painpoints.last_updated <= reroute_checked_at), AND
+      - no category's centroid has moved since that check
+        (max(categories.centroid_updated_at) <= reroute_checked_at).
+
+    Stamp `reroute_checked_at = now()` for every painpoint we evaluated
+    this sweep (whether we yielded a reroute event or not). Painpoints
+    that get rerouted will have their last_updated bumped in the
+    applier, so they're eligible on the next sweep anyway.
 
     Uses a LEAVE-ONE-OUT centroid to estimate the current-category fit —
     otherwise the painpoint's own embedding dominates the normalized
-    centroid it's being compared against (especially in small categories),
-    artificially inflating current_sim and blocking every reroute.
-    Singleton categories (1 member) have no leave-one-out centroid, so
-    we treat current_sim = 0 (any plausible alternative wins).
+    centroid (especially in small categories), artificially inflating
+    current_sim and blocking every reroute. Singleton categories (1
+    member) have no leave-one-out centroid → current_sim = 0.
 
-    Scope:
-    - Skips painpoints in Uncategorized (step 1 handles those).
-    - Skips reroutes *to* Uncategorized (don't demote).
+    Skips painpoints in Uncategorized (step 1 handles those) and never
+    reroutes TO Uncategorized.
     """
-    from .embeddings import (
-        find_best_category_ranked,
-        iter_category_member_embeddings,
-        leave_one_out_centroid_sim,
-    )
-
     uncat_id = _uncategorized_id(conn)
+    now = _now()
+
+    # Latest centroid move across the whole tree — a single scalar so we
+    # can short-circuit the skip check per painpoint. NULL (never
+    # updated) is treated as "always recent enough to force a check".
+    max_centroid_row = conn.execute(
+        "SELECT MAX(centroid_updated_at) AS ts FROM categories"
+    ).fetchone()
+    global_last_centroid_move = max_centroid_row["ts"] if max_centroid_row else None
 
     cat_rows = conn.execute(
         """
@@ -456,13 +641,30 @@ def propose_reroute_events(conn, embedder=None):
 
     for cat_row in cat_rows:
         current_cat = cat_row["cat_id"]
-        # Batch-load all member embeddings once — reused across every
-        # painpoint in this category for leave-one-out.
         members = list(iter_category_member_embeddings(conn, current_cat))
         if not members:
             continue
 
+        # Per-painpoint skip state: pull last_updated + reroute_checked_at
+        # in one batch keyed by id.
+        pp_ids = [pp_id for pp_id, _ in members]
+        placeholders = in_clause_placeholders(len(pp_ids))
+        meta_rows = conn.execute(
+            f"SELECT id, last_updated, reroute_checked_at "
+            f"FROM painpoints WHERE id IN ({placeholders})",
+            pp_ids,
+        ).fetchall()
+        meta = {r["id"]: r for r in meta_rows}
+
+        checked_this_pass = []
         for pp_id, emb in members:
+            row = meta.get(pp_id)
+            if row is not None and _reroute_skip_safe(
+                row["reroute_checked_at"], row["last_updated"],
+                global_last_centroid_move,
+            ):
+                continue
+
             loo_sim = leave_one_out_centroid_sim(members, pp_id, emb)
             current_sim = 0.0 if loo_sim is None else loo_sim
 
@@ -475,6 +677,8 @@ def propose_reroute_events(conn, embedder=None):
                 if sim > best_other_sim:
                     best_other_id = cat_id
                     best_other_sim = sim
+
+            checked_this_pass.append(pp_id)
 
             if best_other_id is None:
                 continue
@@ -497,6 +701,31 @@ def propose_reroute_events(conn, embedder=None):
                 metric_value=margin,
                 threshold=REROUTE_MARGIN,
             )
+
+        # Stamp the checked painpoints so the next sweep can skip them
+        # if nothing relevant changes in the meantime.
+        if checked_this_pass:
+            stamp_placeholders = in_clause_placeholders(len(checked_this_pass))
+            conn.execute(
+                f"UPDATE painpoints SET reroute_checked_at = ? "
+                f"WHERE id IN ({stamp_placeholders})",
+                [now, *checked_this_pass],
+            )
+
+
+def _reroute_skip_safe(reroute_checked_at, last_updated, global_last_centroid_move):
+    """Return True if a painpoint can safely skip this sweep's reroute
+    check. See propose_reroute_events docstring for the rule."""
+    if reroute_checked_at is None:
+        return False
+    if last_updated is not None and last_updated > reroute_checked_at:
+        return False
+    if (
+        global_last_centroid_move is not None
+        and global_last_centroid_move > reroute_checked_at
+    ):
+        return False
+    return True
 
 
 def _test_reroute_painpoint(conn, event):
@@ -525,16 +754,27 @@ def _test_reroute_painpoint(conn, event):
     return True, f"margin {event.metric_value:.3f} >= {event.threshold:.3f}"
 
 
-def _apply_reroute_painpoint(conn, event, namer):
+def _apply_reroute_painpoint(conn, event, namer, embedder=None):
+    del namer, embedder  # reroute is pure DB mutation
     pp_id = event.payload["painpoint_id"]
     from_id = event.payload["from_category_id"]
     to_id = event.payload["to_category_id"]
 
+    emb = get_painpoint_embedding(conn, pp_id)
     conn.execute(
         "UPDATE painpoints SET category_id = ?, last_updated = ? WHERE id = ?",
         (to_id, _now(), pp_id),
     )
-    # Both centroids shift: from_id lost a member, to_id gained one.
+    # Incrementally shift both centroids: from_id loses this member,
+    # to_id gains it. Falls back to a full rebuild for either side if
+    # the painpoint has no embedding row (shouldn't happen in practice
+    # but keeps the state consistent).
+    if emb is None:
+        rebuild_centroid_from_members(conn, from_id)
+        rebuild_centroid_from_members(conn, to_id)
+    else:
+        remove_member_from_centroid(conn, from_id, emb)
+        add_member_to_centroid(conn, to_id, emb)
     update_category_embedding(conn, from_id)
     update_category_embedding(conn, to_id)
     return pp_id
@@ -617,37 +857,134 @@ def _get_taxonomy_for_llm(conn):
     return root_list, flat_list
 
 
+def _current_category_for(conn, pp_ids):
+    """Return {pp_id: current_category_id} for every painpoint in pp_ids,
+    read BEFORE we mutate them. Used by incremental-centroid bookkeeping
+    so we know which source category's sum to decrement for each mover.
+    """
+    if not pp_ids:
+        return {}
+    placeholders = ",".join("?" * len(pp_ids))
+    rows = conn.execute(
+        f"SELECT id, category_id FROM painpoints WHERE id IN ({placeholders})",
+        pp_ids,
+    ).fetchall()
+    return {r["id"]: r["category_id"] for r in rows}
+
+
+def _apply_member_move_delta(conn, pp_ids, prev_category_for, target_id):
+    """Update the (sum, count) caches for a batch move: each pp leaves
+    its previous category and joins `target_id`. Painpoints that stay
+    where they are (prev == target) are skipped. Categories fully drained
+    by the move get a full rebuild so their sum resets to zero cleanly.
+    """
+    sources_touched = set()
+    target_delta = 0
+    for pp_id in pp_ids:
+        prev = prev_category_for.get(pp_id)
+        if prev == target_id:
+            continue
+        emb = get_painpoint_embedding(conn, pp_id)
+        if emb is None:
+            # No embedding → we can't do an incremental delta for this
+            # one. Force a rebuild on both sides at the end.
+            sources_touched.add(prev)
+            target_delta = None if target_delta is None else None
+            continue
+        if prev is not None:
+            remove_member_from_centroid(conn, prev, emb)
+            sources_touched.add(prev)
+        add_member_to_centroid(conn, target_id, emb)
+
+    # If we couldn't delta-update cleanly anywhere, rebuild affected cats.
+    if target_delta is None:
+        rebuild_centroid_from_members(conn, target_id)
+    for src in sources_touched:
+        if src is None:
+            continue
+        # If this source ended up empty after the moves, make sure its
+        # cached sum is zeroed cleanly (rebuild is cheap for empty cats).
+        remaining = conn.execute(
+            "SELECT COUNT(*) FROM painpoints WHERE category_id = ?", (src,)
+        ).fetchone()[0]
+        if remaining == 0:
+            rebuild_centroid_from_members(conn, src)
+
+
+def _upsert_category_by_name(conn, name, description, parent_id):
+    """Return a category id for `name`, creating the row if it doesn't
+    exist yet. Existing rows are reused as-is (description/parent are
+    NOT overwritten — that prevents a later LLM pass from rewriting a
+    curated seed's fields). Used by both add_category_new and
+    add_category_split so the collision-handling is identical.
+    """
+    existing = conn.execute(
+        "SELECT id FROM categories WHERE name = ?", (name,),
+    ).fetchone()
+    if existing is not None:
+        return existing["id"]
+    conn.execute(
+        "INSERT INTO categories (name, parent_id, description, created_at) "
+        "VALUES (?, ?, ?, ?)",
+        (name, parent_id, description, _now()),
+    )
+    return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+
+def _drop_category_vec_state(conn, category_id):
+    """Drop a category's vec rows (main centroid + anchor) ahead of a
+    DELETE on the categories row — prevents find_best_category from
+    returning an orphaned rowid that would FK-fail the next promote.
+
+    Narrow to sqlite3.Error: if sqlite-vec's virtual table is
+    unavailable we want to see the traceback. The previous
+    `except Exception: pass` hid real bugs.
+    """
+    try:
+        conn.execute(
+            "DELETE FROM category_vec WHERE rowid = ?", (category_id,)
+        )
+    except sqlite3.Error as exc:
+        log.warning(
+            "category_vec delete failed for cat_id=%s: %s — continuing",
+            category_id, exc,
+        )
+    delete_category_anchor(conn, category_id)
+
+
 def _resolve_parent_id(conn, parent_name):
     """Resolve a parent category name returned by the LLM to a parent_id.
 
-    The LLM sometimes returns the full path format 'Root > Child' instead
-    of just the category name. We try both the raw string and the last
-    segment after '>'. Matches ANY existing category (root or child).
-    Returns None if the name is null/empty or doesn't match anything.
+    Prompt contract: LLM returns the EXACT name of an existing category
+    or null. The previous 3-candidate fallback ("maybe it's a path,
+    maybe it's the last segment, maybe it's the first segment") hid
+    LLM drift instead of surfacing it. One lookup; if it misses we log
+    and fall back to root placement — the log line tells us when the
+    prompt contract is slipping.
     """
     if not parent_name:
         return None
-    candidates = [parent_name.strip()]
-    if ">" in parent_name:
-        # "Cloud & Infrastructure > Databases" → try "Databases" too
-        candidates.append(parent_name.split(">")[-1].strip())
-        # Also try the first segment: "Cloud & Infrastructure"
-        candidates.append(parent_name.split(">")[0].strip())
-    for name in candidates:
-        row = conn.execute(
-            "SELECT id FROM categories WHERE name = ?", (name,)
-        ).fetchone()
-        if row is not None:
-            return row["id"]
+    name = parent_name.strip()
+    # Tolerance carve-out: the LLM occasionally emits "Root > Child"
+    # instead of just "Child". Split on '>' and try the last segment
+    # as a single retry — keeps us compatible with the most common
+    # drift without the previous shotgun approach.
+    if ">" in name:
+        name = name.split(">")[-1].strip()
+    row = conn.execute(
+        "SELECT id FROM categories WHERE name = ?", (name,),
+    ).fetchone()
+    if row is not None:
+        return row["id"]
     log.warning(
-        "LLM proposed parent=%r but no category matched (tried %s) — "
+        "LLM proposed parent=%r but no category matched — "
         "falling back to root placement",
-        parent_name, candidates,
+        parent_name,
     )
     return None
 
 
-def _apply_add_category_new(conn, event, namer):
+def _apply_add_category_new(conn, event, namer, embedder=None):
     # Use pre-fetched LLM response if available (from prefetch_llm_for_event
     # called concurrently before we entered the savepoint). Falls back to
     # an inline call if not pre-fetched.
@@ -665,35 +1002,29 @@ def _apply_add_category_new(conn, event, namer):
         raise RuntimeError("LLM returned empty category name")
 
     parent_id = _resolve_parent_id(conn, parent_name)
+    target_id = _upsert_category_by_name(conn, name, description, parent_id)
 
-    # Name collision check — if a category with this name already exists,
-    # reuse it instead of creating a duplicate.
-    existing = conn.execute(
-        "SELECT id FROM categories WHERE name = ?", (name,)
-    ).fetchone()
-    if existing is not None:
-        target_id = existing["id"]
-    else:
-        conn.execute(
-            "INSERT INTO categories (name, parent_id, description, created_at) "
-            "VALUES (?, ?, ?, ?)",
-            (name, parent_id, description, _now()),
-        )
-        target_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    # Anchor the category to its declared identity before members land,
+    # so update_category_embedding can blend rather than drift with the
+    # first few arrivals.
+    if embedder is not None:
+        store_category_anchor(conn, target_id, name, description, embedder)
 
-    for pp_id in event.payload["painpoint_ids"]:
+    moved_ids = event.payload["painpoint_ids"]
+    # Track previous categories so we can decrement their cached sums.
+    prev_rows = _current_category_for(conn, moved_ids)
+    for pp_id in moved_ids:
         conn.execute(
             "UPDATE painpoints SET category_id = ?, last_updated = ? WHERE id = ?",
             (target_id, _now(), pp_id),
         )
-
-    # Update the new category's embedding from its members
+    _apply_member_move_delta(conn, moved_ids, prev_rows, target_id)
     update_category_embedding(conn, target_id)
 
     return target_id
 
 
-def _apply_add_category_split(conn, event, namer):
+def _apply_add_category_split(conn, event, namer, embedder=None):
     """Apply an LLM-decided split. The payload already contains the
     LLM's sub-category names + descriptions + painpoint groupings
     (decided in propose_split_events). We just materialize them.
@@ -710,25 +1041,19 @@ def _apply_add_category_split(conn, event, namer):
         if not name or not pp_ids:
             continue
 
-        existing = conn.execute(
-            "SELECT id FROM categories WHERE name = ?", (name,)
-        ).fetchone()
-        if existing is not None:
-            sub_id = existing["id"]
-        else:
-            conn.execute(
-                "INSERT INTO categories (name, parent_id, description, created_at) "
-                "VALUES (?, ?, ?, ?)",
-                (name, parent_id, description, _now()),
-            )
-            sub_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        sub_id = _upsert_category_by_name(conn, name, description, parent_id)
         new_cat_ids.append(sub_id)
 
+        if embedder is not None:
+            store_category_anchor(conn, sub_id, name, description, embedder)
+
+        prev_rows = _current_category_for(conn, pp_ids)
         for pp_id in pp_ids:
             conn.execute(
                 "UPDATE painpoints SET category_id = ?, last_updated = ? WHERE id = ?",
                 (sub_id, _now(), pp_id),
             )
+        _apply_member_move_delta(conn, pp_ids, prev_rows, sub_id)
         # Keep the new sub-category's embedding fresh as members populate it.
         update_category_embedding(conn, sub_id)
 
@@ -737,26 +1062,21 @@ def _apply_add_category_split(conn, event, namer):
         "SELECT COUNT(*) FROM painpoints WHERE category_id = ?", (source_id,)
     ).fetchone()[0]
     if remaining == 0 and parent_id is not None:
-        # Clean up the source's embedding too, otherwise the orphaned
-        # vec row can still be returned by find_best_category and cause
-        # a FK failure on the next promote.
-        try:
-            conn.execute("DELETE FROM category_vec WHERE rowid = ?", (source_id,))
-        except Exception:
-            pass
+        _drop_category_vec_state(conn, source_id)
         conn.execute("DELETE FROM categories WHERE id = ?", (source_id,))
     elif remaining > 0:
-        # Partial split: the LLM didn't put every member into a
-        # sub-category, so the source category survives but its member
-        # set shrank. Refresh its centroid to match the current members,
-        # otherwise subsequent find_best_category calls would use the
-        # stale pre-split centroid.
+        # Partial split: the source lost members — its cached sum was
+        # already decremented by _apply_member_move_delta, so we just
+        # need to re-blend category_vec. If the cache somehow drifted,
+        # the sum/count rebuild fallback inside update_category_embedding
+        # picks it up.
         update_category_embedding(conn, source_id)
 
     return new_cat_ids
 
 
-def _apply_delete_category(conn, event, namer):
+def _apply_delete_category(conn, event, namer, embedder=None):
+    del namer, embedder  # not needed for a pure DB mutation
     cat_id = event.payload["category_id"]
     parent_id = event.payload["parent_id"]
 
@@ -765,38 +1085,34 @@ def _apply_delete_category(conn, event, namer):
     if fallback_id is None:
         fallback_id = _uncategorized_id(conn)
 
-    # Check if there are actually any members to move (for the centroid
-    # refresh decision below — we only need to refresh the fallback's
-    # centroid if it gained new members).
-    moved_count = conn.execute(
-        "SELECT COUNT(*) FROM painpoints WHERE category_id = ?", (cat_id,)
-    ).fetchone()[0]
+    # Grab the IDs BEFORE the move so we can rebuild the fallback's
+    # centroid incrementally. Bulk moves are cheaper with a single
+    # rebuild-on-target than N individual deltas, so we just rebuild
+    # the fallback after the move completes.
+    moved_ids = [
+        r["id"] for r in conn.execute(
+            "SELECT id FROM painpoints WHERE category_id = ?", (cat_id,),
+        ).fetchall()
+    ]
 
     conn.execute(
         "UPDATE painpoints SET category_id = ?, last_updated = ? WHERE category_id = ?",
         (fallback_id, _now(), cat_id),
     )
-    # Clean up this category's embedding from category_vec before the
-    # categories row is deleted — otherwise find_best_category can
-    # return the orphaned rowid and the next promote FK-fails.
-    try:
-        conn.execute("DELETE FROM category_vec WHERE rowid = ?", (cat_id,))
-    except Exception:
-        pass
+    _drop_category_vec_state(conn, cat_id)
     conn.execute("DELETE FROM categories WHERE id = ?", (cat_id,))
 
-    # Refresh the fallback parent's centroid — its member set just grew
-    # by `moved_count` painpoints. Skip when no members moved (test-only
-    # path where a delete is proposed against an empty category) or when
-    # the fallback is Uncategorized (which is centroid-exempt; the
-    # update function has its own guard, but we short-circuit for clarity).
-    if moved_count > 0:
+    if moved_ids:
+        # Fallback gained a batch of members. Single rebuild is cheaper
+        # than N increments for bulk moves. Skips cleanly for
+        # Uncategorized (update_category_embedding is a no-op there).
+        rebuild_centroid_from_members(conn, fallback_id)
         update_category_embedding(conn, fallback_id)
 
     return cat_id
 
 
-def _apply_merge_categories(conn, event, namer):
+def _apply_merge_categories(conn, event, namer, embedder=None):
     """Apply a sibling-merge event.
 
     Cascade-safe: earlier merges in the same sweep may have already
@@ -835,12 +1151,11 @@ def _apply_merge_categories(conn, event, namer):
         "UPDATE painpoints SET category_id = ?, last_updated = ? WHERE category_id = ?",
         (survivor_id, _now(), loser_id),
     )
-    # Clean up loser's embedding from category_vec
-    try:
-        conn.execute("DELETE FROM category_vec WHERE rowid = ?", (loser_id,))
-    except Exception:
-        pass
+    _drop_category_vec_state(conn, loser_id)
     conn.execute("DELETE FROM categories WHERE id = ?", (loser_id,))
+    # Survivor absorbed the loser's members wholesale — one rebuild is
+    # cheaper than per-member deltas for a bulk merge.
+    rebuild_centroid_from_members(conn, survivor_id)
 
     # Use pre-fetched LLM response if available, else call inline.
     desc_resp = event.llm_result
@@ -861,6 +1176,9 @@ def _apply_merge_categories(conn, event, namer):
             "UPDATE categories SET description = ? WHERE id = ?",
             (new_desc, survivor_id),
         )
+        # Description changed → re-anchor to match the new text.
+        if embedder is not None:
+            store_category_anchor(conn, survivor_id, survivor_name, new_desc, embedder)
 
     # Update the survivor's embedding with the new description
     update_category_embedding(conn, survivor_id)
@@ -877,11 +1195,11 @@ _APPLIERS = {
 }
 
 
-def apply_event(conn, event, namer):
+def apply_event(conn, event, namer, embedder=None):
     fn = _APPLIERS.get(event.event_type)
     if fn is None:
         raise ValueError(f"unknown event type {event.event_type}")
-    return fn(conn, event, namer)
+    return fn(conn, event, namer, embedder)
 
 
 # ---------------------------------------------------------------------------
@@ -918,9 +1236,15 @@ def log_event(conn, event, accepted, reason=""):
         )
 
 
-def apply_with_test(conn, event, namer):
+def apply_with_test(conn, event, namer, embedder=None):
     """Test first, apply only on accept; savepoint protects against
-    mid-apply failures, not against test rejection (per §5.4)."""
+    mid-apply failures, not against test rejection (per §5.4).
+
+    `embedder` is threaded through to the _apply_* functions that need
+    to compute a category anchor embedding (new / split / merged
+    categories). When None, anchor writes are skipped and the category
+    falls back to pure member-mean behavior — preserves backwards
+    compatibility for tests that don't care about the anchor."""
     ok, reason = run_acceptance_test(conn, event)
     if not ok:
         log_event(conn, event, accepted=False, reason=reason)
@@ -928,7 +1252,7 @@ def apply_with_test(conn, event, namer):
 
     conn.execute("SAVEPOINT cat_event")
     try:
-        apply_event(conn, event, namer)
+        apply_event(conn, event, namer, embedder)
     except Exception as e:
         conn.execute("ROLLBACK TO SAVEPOINT cat_event")
         log_event(conn, event, accepted=False, reason=f"apply error: {e}")
@@ -1010,48 +1334,44 @@ def prefetch_llm_one_event(event, namer, context):
         )
 
 
-def parallel_namer_calls(call_specs, max_workers=5):
-    """Generic helper: fan out arbitrary LLM calls across a thread pool.
+def parallel_namer_calls(call_specs, max_workers=_LLM_PARALLEL_WORKERS):
+    """Fan out LLM calls across a thread pool. Returns
+    `(results, errors)` where `results` is `{key: result}` for
+    successful calls and `errors` is `{key: exception}` for failed
+    ones. Previously swallowed exceptions as `None`, which made
+    callers unable to distinguish "LLM returned None" from "LLM call
+    raised" — the new shape lets them decide.
 
-    `call_specs` is an iterable of `(key, callable)` pairs. The callable
-    must take no arguments (use functools.partial / lambda / closure).
-    Returns a dict `{key: result_or_None}` — failures are logged and
-    return None for that key (so callers can decide whether to skip,
-    fall back, or treat as soft failure).
-
-    Used by:
-      - prefetch_llm_batch (apply-phase LLM calls bound to CategoryEvent)
-      - propose_split_events (decide_split LLM call per candidate)
-      - any future per-item LLM fan-out
-
-    Network calls happen in parallel; the global OpenAI semaphore in
-    llm.py caps total in-flight calls regardless of how many pools
-    exist. Each call is INDEPENDENT — must not share a DB connection.
+    Each call is INDEPENDENT — must not share a DB connection. The
+    global OpenAI semaphore in llm.py caps total in-flight calls
+    regardless of how many pools exist.
     """
-    import concurrent.futures as cf
-
     specs = list(call_specs)
     if not specs:
-        return {}
+        return {}, {}
 
     results = {}
+    errors = {}
 
     def _run_one(key, fn):
         try:
-            return key, fn()
-        except Exception as e:
-            log.warning("parallel_namer_calls: %r failed: %s", key, e)
-            return key, None
+            return key, fn(), None
+        except Exception as exc:   # noqa: BLE001 — surfaced to caller
+            return key, None, exc
 
-    with cf.ThreadPoolExecutor(max_workers=max_workers) as pool:
+    with _cf.ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = [pool.submit(_run_one, k, fn) for k, fn in specs]
         for f in futures:
-            k, v = f.result()
-            results[k] = v
-    return results
+            key, value, exc = f.result()
+            if exc is not None:
+                errors[key] = exc
+                log.warning("parallel_namer_calls: %r failed: %s", key, exc)
+            else:
+                results[key] = value
+    return results, errors
 
 
-def prefetch_llm_batch(conn, events, namer, max_workers=5):
+def prefetch_llm_batch(conn, events, namer, max_workers=_LLM_PARALLEL_WORKERS):
     """Fan out LLM calls for a list of events across a thread pool so
     they happen concurrently instead of serially inside apply_with_test.
 

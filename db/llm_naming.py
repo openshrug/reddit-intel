@@ -38,6 +38,29 @@ class SplitDecision(BaseModel):
     )
 
 
+class UncatDecision(BaseModel):
+    """LLM review of a single Uncategorized painpoint. Either mints a
+    new category anchored at some existing parent, or leaves the
+    painpoint where it is. Default should lean toward `keep`."""
+    action: Literal["create", "keep"]
+    reason: str = Field(description="One-sentence rationale")
+    name: Optional[str] = Field(
+        default=None,
+        description="New category name (2-4 words). Required when action=create.",
+    )
+    description: Optional[str] = Field(
+        default=None,
+        description="Keyword-rich description for the new category (30-50 words). "
+                    "Required when action=create.",
+    )
+    parent: Optional[str] = Field(
+        default=None,
+        description="Exact name of the existing category to nest this under. "
+                    "Required when action=create. Use a ROOT name if no existing "
+                    "branch fits well.",
+    )
+
+
 class LLMNamer:
     """Default namer that calls the project's `llm.py` helpers.
 
@@ -187,6 +210,53 @@ class LLMNamer:
         })
         return self._call_structured(system, user, SplitDecision, max_tokens=1500)
 
+    def decide_uncategorized(self, title: str, description: str,
+                              signal_count: int, severity: int,
+                              existing_taxonomy: List[dict]) -> UncatDecision:
+        """Review a single Uncategorized painpoint. Decide whether it
+        warrants its own category in the tree (and if so, pick a parent
+        + propose name/description), or whether it should stay put.
+
+        Conservative by design — default is `keep`.
+        """
+        taxonomy_str = (
+            "\n".join(f"  - {e['path']}" for e in existing_taxonomy[:80])
+            if existing_taxonomy else "  (empty)"
+        )
+        system = (
+            "You are a taxonomist reviewing ONE painpoint that landed in the "
+            "Uncategorized bucket. Decide whether it's distinctive and "
+            "actionable enough to justify creating a brand-new category in "
+            "the tree, OR whether it should stay in Uncategorized.\n\n"
+            "CREATE a new category only when ALL of these hold:\n"
+            "  - The painpoint is a concrete product / developer / tooling "
+            "concern (not philosophy, opinion, or social commentary).\n"
+            "  - It represents a topic likely to have SIBLING painpoints in "
+            "the future (worth a named bucket, not a one-off).\n"
+            "  - It genuinely doesn't fit under any existing branch.\n"
+            "  - The severity/signal suggests real-world relevance.\n\n"
+            "KEEP in Uncategorized when ANY of these hold:\n"
+            "  - The painpoint is too narrow, one-off, or niche.\n"
+            "  - It's a meta-complaint (confidence, mindset, generic advice).\n"
+            "  - It's a low-signal singleton with no clear product area.\n"
+            "  - A reasonable existing branch could absorb it later once "
+            "similar painpoints accumulate (we'll let clustering handle that).\n\n"
+            "Default to `keep` — only create when the case is clearly strong.\n\n"
+            "When creating, `parent` must EXACTLY match an existing taxonomy "
+            "entry (use the last segment of the path, e.g. 'Databases' from "
+            "'Cloud & Infrastructure > Databases', or a root name). The new "
+            "category description must be keyword-rich (30-50 words) to help "
+            "future embedding-based routing.\n\n"
+            "EXISTING TAXONOMY TREE:\n" + taxonomy_str
+        )
+        user = json.dumps({
+            "title": title,
+            "description": description or "",
+            "signal_count": signal_count,
+            "severity": severity,
+        })
+        return self._call_structured(system, user, UncatDecision, max_tokens=600)
+
     def describe_merged_category(self, survivor_name: str, loser_name: str,
                                   sample_member_titles: List[str]):
         """After merging two categories, generate an updated description
@@ -239,6 +309,13 @@ class FakeNamer:
     def describe_merged_category(self, survivor_name, loser_name,
                                  sample_member_titles):
         return {"description": f"Merged: {survivor_name} + {loser_name}"}
+
+    def decide_uncategorized(self, title, description, signal_count, severity,
+                              existing_taxonomy):
+        """Test double: default to `keep` so hermetic tests don't spuriously
+        spawn new categories. Override via name_fn/split_fn isn't wired here
+        — callers that need create-paths should inject their own namer."""
+        return UncatDecision(action="keep", reason="fake: default keep")
 
     def decide_split(self, category_name, category_description, total_members, clusters):
         """Test double: always returns 'keep' unless clusters has ≥2 clusters

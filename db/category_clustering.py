@@ -12,6 +12,7 @@ and inter-category similarity operations.
 import math
 import struct
 
+from . import in_clause_placeholders
 from .embeddings import (
     EMBEDDING_DIM,
     FakeEmbedder,
@@ -83,7 +84,7 @@ def cluster_painpoints(painpoints, threshold=0.40, embedder=None, conn=None):
         ids = [p["id"] for p in painpoints]
         rows = conn.execute(
             f"SELECT rowid, embedding FROM painpoint_vec "
-            f"WHERE rowid IN ({','.join('?' * len(ids))})",
+            f"WHERE rowid IN ({in_clause_placeholders(len(ids))})",
             ids,
         ).fetchall()
         expected_bytes = EMBEDDING_DIM * 4

@@ -176,8 +176,7 @@ def _print_hijacked_bucket_samples(top_k=5):
               flush=True)
         pps = conn.execute("""
             SELECT id, title, signal_count FROM painpoints
-            WHERE category_id = ?
-            ORDER BY signal_count DESC, id DESC LIMIT ?
+            WHERE category_id = ? LIMIT ?
         """, (cat_id, top_k)).fetchall()
         for p in pps:
             print(f"    [{p['id']}] sig={p['signal_count']}  "

@@ -25,10 +25,24 @@ MERGE_COSINE_THRESHOLD = 0.60   # above this -> merge into existing painpoint
 #   same-topic LLM-condensed titles:     0.55-0.70 cosine sim (shorter, more formal)
 #   different topics:                    0.23-0.29 cosine sim
 # 0.60 catches LLM-condensed duplicates while keeping different topics clearly separate.
-CATEGORY_COSINE_THRESHOLD = 0.45  # below this for ALL categories -> Uncategorized
-# 0.45 sits clearly above the different-topics band (0.23-0.29) so
-# Uncategorized fires on genuinely novel painpoints rather than
-# rubber-stamping the nearest category from the noise floor.
+CATEGORY_COSINE_THRESHOLD = 0.35  # below this for ALL categories -> Uncategorized
+# Lowered from 0.45 after introducing ANCHOR_WEIGHT: anchored
+# category_vec represents declared intent (a static, curated embedding),
+# not drifted member noise — so a less-strict match threshold no longer
+# rubber-stamps everything, and legitimate painpoints that share topic
+# with a seed category can land in it. Original 0.30 failed *because*
+# centroids drifted; now that drift is bounded by the anchor, 0.35 sits
+# clear of the different-topic noise floor (0.23-0.29) while avoiding
+# the overly-tight 0.45 that sent 64% of painpoints to Uncategorized
+# in the live run.
+
+# Category vector = ANCHOR_WEIGHT · anchor(name+desc) + (1-ANCHOR_WEIGHT) · mean(members).
+# 0.85 (up from 0.7) tightens the anchor's authority after observing
+# residual mis-routing: under 0.7 the 30% member contribution still
+# let an "AI Coding Tools" bucket creep toward general AI-business
+# painpoints. 0.15 member share keeps the blend responsive to
+# well-routed members without letting drift take over.
+ANCHOR_WEIGHT = 0.85
 
 
 # ---------------------------------------------------------------------------
@@ -159,6 +173,15 @@ def init_vec_tables(conn):
     """Create the vec0 virtual tables if they don't exist.
 
     Must be called after sqlite_vec.load(conn).
+
+    Three tables:
+    - painpoint_vec: one row per painpoint, embedding of its text.
+    - category_vec: the blended vector used for matching (see
+      update_category_embedding). Queried by find_best_category.
+    - category_anchor_vec: the stable anchor (embedding of
+      name+description), recomputed only when the category's
+      description changes. Blended with the member mean to produce
+      category_vec.
     """
     conn.execute(
         "CREATE VIRTUAL TABLE IF NOT EXISTS painpoint_vec USING vec0("
@@ -167,6 +190,11 @@ def init_vec_tables(conn):
     )
     conn.execute(
         "CREATE VIRTUAL TABLE IF NOT EXISTS category_vec USING vec0("
+        "    embedding float[1536] distance_metric=cosine"
+        ")"
+    )
+    conn.execute(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS category_anchor_vec USING vec0("
         "    embedding float[1536] distance_metric=cosine"
         ")"
     )
@@ -210,6 +238,64 @@ def store_category_embedding(conn, category_id, embedding):
     conn.execute(
         "INSERT INTO category_vec (rowid, embedding) VALUES (?, ?)",
         (category_id, blob),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Category anchor: static embedding of name + description.
+# Stored separately from category_vec so it survives member-mean updates
+# and only re-embeds when the description actually changes.
+# ---------------------------------------------------------------------------
+
+
+def _anchor_text(name, description):
+    """Canonical text used to compute a category's anchor embedding."""
+    desc = (description or "").strip()
+    name = (name or "").strip()
+    return f"{name} {desc}".strip()
+
+
+def store_category_anchor(conn, category_id, name, description, embedder):
+    """Compute and store the anchor embedding for a category.
+
+    Call on category creation and on description changes. Idempotent —
+    re-calling with the same name/description overwrites the same row.
+    No-op if the combined text is empty (pathological seed rows).
+    """
+    text = _anchor_text(name, description)
+    if not text:
+        return
+    emb = embedder.embed(text)
+    blob = _pack_embedding(emb)
+    conn.execute(
+        "DELETE FROM category_anchor_vec WHERE rowid = ?", (category_id,)
+    )
+    conn.execute(
+        "INSERT INTO category_anchor_vec (rowid, embedding) VALUES (?, ?)",
+        (category_id, blob),
+    )
+
+
+def get_category_anchor(conn, category_id):
+    """Return the category's anchor embedding as a list of floats, or
+    None if there isn't one (older DBs, seed not yet bootstrapped)."""
+    row = conn.execute(
+        "SELECT embedding FROM category_anchor_vec WHERE rowid = ?",
+        (category_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    blob = row[0]
+    expected_bytes = EMBEDDING_DIM * 4
+    if len(blob) != expected_bytes:
+        return None
+    return list(struct.unpack(f"{EMBEDDING_DIM}f", blob))
+
+
+def delete_category_anchor(conn, category_id):
+    """Drop the anchor for a category being deleted/merged away."""
+    conn.execute(
+        "DELETE FROM category_anchor_vec WHERE rowid = ?", (category_id,)
     )
 
 
@@ -310,29 +396,23 @@ def find_most_similar_painpoint(conn, embedding, exclude_ids=None):
 
 
 def bootstrap_category_embeddings(conn, embedder):
-    """Seed embeddings for categories that have no vector in category_vec.
+    """Seed anchor embeddings for categories that don't have one yet,
+    and propagate the anchor into category_vec so find_best_category
+    can match against seed categories before any member lands.
 
-    Uses the category's `name + description` as the text to embed. This
-    bootstraps taxonomy categories from seed (which have descriptions but
-    no member painpoints yet). As painpoints are added to categories, the
-    embeddings get overwritten by the mean-of-members approach in
-    update_category_embedding, which is strictly better.
-
-    Uses `embed_batch` so all categories embed in a single API round-trip
-    instead of N sequential ones (cold-start lock-hold drops from
-    ~N×200ms to ~300ms total).
+    Uses `embed_batch` so all categories embed in a single API
+    round-trip instead of N sequential ones.
     """
-    # Collect categories that need bootstrapping in one query.
     rows = conn.execute("""
         SELECT c.id, c.name, c.description
         FROM categories c
-        LEFT JOIN category_vec cv ON cv.rowid = c.id
-        WHERE c.name != 'Uncategorized' AND cv.rowid IS NULL
+        LEFT JOIN category_anchor_vec av ON av.rowid = c.id
+        WHERE c.name != 'Uncategorized' AND av.rowid IS NULL
     """).fetchall()
 
     pending = []
     for cat in rows:
-        text = f"{cat['name']} {cat['description'] or ''}".strip()
+        text = _anchor_text(cat["name"], cat["description"])
         if not text:
             continue
         pending.append((cat["id"], text))
@@ -349,7 +429,18 @@ def bootstrap_category_embeddings(conn, embedder):
             f"would silently mis-pair categories"
         )
     for (cat_id, _text), emb in zip(pending, embeddings):
-        store_category_embedding(conn, cat_id, emb)
+        blob = _pack_embedding(emb)
+        conn.execute(
+            "DELETE FROM category_anchor_vec WHERE rowid = ?", (cat_id,)
+        )
+        conn.execute(
+            "INSERT INTO category_anchor_vec (rowid, embedding) VALUES (?, ?)",
+            (cat_id, blob),
+        )
+        # Populate category_vec via the blend logic so seeded categories
+        # are immediately queryable. With no members yet the blend
+        # degenerates to the anchor itself.
+        update_category_embedding(conn, cat_id)
 
 
 def find_best_category(conn, embedding, embedder=None):
@@ -400,81 +491,246 @@ def _uncategorized_id(conn):
     return uncategorized_id(conn)
 
 
-def update_category_embedding(conn, category_id, embedder=None):
-    """Recompute a category's embedding as the mean of its members'
-    painpoint embeddings.
+def _normalize(v):
+    """In-place normalize to unit length. Returns v (or an all-zero v
+    unchanged if the norm is zero — callers decide how to handle)."""
+    norm = math.sqrt(sum(x * x for x in v))
+    if norm > 0:
+        for i in range(len(v)):
+            v[i] /= norm
+    return v
 
-    If the category has no members with embeddings, remove its entry
-    from category_vec.
 
-    Skips the Uncategorized sentinel — it's a dumping ground for
-    heterogeneous painpoints with no semantic coherence, so a centroid
-    would be a noisy vector that pulls future painpoints into
-    Uncategorized instead of real categories.
+# ---------------------------------------------------------------------------
+# Incremental centroid state
+#
+# `categories.member_emb_sum_blob` holds the raw element-wise sum of every
+# current member's embedding. `categories.member_emb_count` holds the
+# member count. The normalized mean-of-members is derived on demand as
+# `sum / count → normalize`.
+#
+# add_member_to_centroid / remove_member_from_centroid update the sum/count
+# in O(EMBEDDING_DIM) instead of re-scanning every member's painpoint_vec
+# row. update_category_embedding then re-blends anchor + derived mean
+# without touching painpoint_vec at all — turns the hottest path from
+# O(N members) into O(1) per mutation.
+# ---------------------------------------------------------------------------
+
+
+def _unpack_sum(blob):
+    if blob is None:
+        return [0.0] * EMBEDDING_DIM
+    if len(blob) != EMBEDDING_DIM * 4:
+        return [0.0] * EMBEDDING_DIM
+    return list(struct.unpack(f"{EMBEDDING_DIM}f", blob))
+
+
+def _pack_sum(sum_vec):
+    # Same layout as _pack_embedding but without dimension-assertion
+    # (the sum can be any magnitude; we only care about the shape).
+    return struct.pack(f"{EMBEDDING_DIM}f", *sum_vec)
+
+
+def _bump_centroid_meta(conn, category_id, member_set_changed=True):
+    """Stamp category timestamps. `centroid_updated_at` fires on every
+    cache update (feeds reroute-skip logic); `member_set_last_changed_at`
+    fires only when real membership changed (feeds the staleness /
+    delete-stale-category logic).
+
+    Rebuilds from painpoint_vec are NOT member-set changes — they're
+    cache repairs — so callers pass `member_set_changed=False` there.
     """
-    # Never compute an embedding for the Uncategorized sentinel.
+    now = _now_iso()
+    if member_set_changed:
+        conn.execute(
+            "UPDATE categories SET centroid_updated_at = ?, "
+            "member_set_last_changed_at = ? WHERE id = ?",
+            (now, now, category_id),
+        )
+    else:
+        conn.execute(
+            "UPDATE categories SET centroid_updated_at = ? WHERE id = ?",
+            (now, category_id),
+        )
+
+
+def _now_iso():
+    # Local import avoids a circular import at module load.
+    from . import _now
+    return _now()
+
+
+def add_member_to_centroid(conn, category_id, member_embedding):
+    """Increment the cached (sum, count) with one member's embedding.
+    Caller is responsible for also writing painpoint_vec for the member
+    and for calling `update_category_embedding` afterwards if they want
+    category_vec refreshed in this transaction.
+    """
+    row = conn.execute(
+        "SELECT member_emb_sum_blob, member_emb_count FROM categories "
+        "WHERE id = ?", (category_id,),
+    ).fetchone()
+    if row is None:
+        return
+    sum_vec = _unpack_sum(row["member_emb_sum_blob"])
+    for i in range(EMBEDDING_DIM):
+        sum_vec[i] += member_embedding[i]
+    new_count = (row["member_emb_count"] or 0) + 1
+    conn.execute(
+        "UPDATE categories SET member_emb_sum_blob = ?, member_emb_count = ? "
+        "WHERE id = ?",
+        (_pack_sum(sum_vec), new_count, category_id),
+    )
+    _bump_centroid_meta(conn, category_id)
+
+
+def remove_member_from_centroid(conn, category_id, member_embedding):
+    """Decrement the cached (sum, count) by one member's embedding.
+    Clamps the count at 0 if something is off — the category might
+    still have stale state from a legacy DB without the migration run.
+    """
+    row = conn.execute(
+        "SELECT member_emb_sum_blob, member_emb_count FROM categories "
+        "WHERE id = ?", (category_id,),
+    ).fetchone()
+    if row is None:
+        return
+    sum_vec = _unpack_sum(row["member_emb_sum_blob"])
+    for i in range(EMBEDDING_DIM):
+        sum_vec[i] -= member_embedding[i]
+    new_count = max(0, (row["member_emb_count"] or 0) - 1)
+    if new_count == 0:
+        sum_vec = [0.0] * EMBEDDING_DIM
+    conn.execute(
+        "UPDATE categories SET member_emb_sum_blob = ?, member_emb_count = ? "
+        "WHERE id = ?",
+        (_pack_sum(sum_vec), new_count, category_id),
+    )
+    _bump_centroid_meta(conn, category_id)
+
+
+def rebuild_centroid_from_members(conn, category_id):
+    """Full recompute of (sum, count) from painpoint_vec. Used when a
+    category's state needs to be rebuilt — bulk member moves (split
+    source / merge loser / delete fallback), first-run migration for
+    pre-existing categories, or as a correctness rescue if cached state
+    has drifted.
+    """
+    expected_bytes = EMBEDDING_DIM * 4
+    rows = conn.execute(
+        """
+        SELECT pv.embedding
+        FROM painpoint_vec pv
+        JOIN painpoints p ON p.id = pv.rowid
+        WHERE p.category_id = ?
+        """,
+        (category_id,),
+    ).fetchall()
+    sum_vec = [0.0] * EMBEDDING_DIM
+    count = 0
+    for row in rows:
+        blob = row["embedding"]
+        if len(blob) != expected_bytes:
+            continue
+        try:
+            emb = struct.unpack(f"{EMBEDDING_DIM}f", blob)
+        except struct.error:
+            continue
+        for i in range(EMBEDDING_DIM):
+            sum_vec[i] += emb[i]
+        count += 1
+    conn.execute(
+        "UPDATE categories SET member_emb_sum_blob = ?, member_emb_count = ? "
+        "WHERE id = ?",
+        (_pack_sum(sum_vec) if count else None, count, category_id),
+    )
+    # Pure cache repair — do NOT claim the member set changed. Callers
+    # that actually moved members have already stamped member_set_last_changed_at.
+    _bump_centroid_meta(conn, category_id, member_set_changed=False)
+
+
+def _member_mean_from_cache(conn, category_id):
+    """Read the cached sum/count and derive the normalized mean. Returns
+    None when the category has no members with embeddings. Falls back
+    to a one-shot rebuild if the cache is empty but the category has
+    members (legacy-DB case after the migration added the columns but
+    before anyone populated them).
+    """
+    row = conn.execute(
+        "SELECT member_emb_sum_blob, member_emb_count FROM categories "
+        "WHERE id = ?", (category_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    count = row["member_emb_count"] or 0
+    if count == 0:
+        # If there's a stale member that wasn't tracked (e.g. legacy
+        # categories pre-migration), rebuild. Otherwise truly empty.
+        has_members = conn.execute(
+            "SELECT 1 FROM painpoints WHERE category_id = ? LIMIT 1",
+            (category_id,),
+        ).fetchone()
+        if has_members is None:
+            return None
+        rebuild_centroid_from_members(conn, category_id)
+        row = conn.execute(
+            "SELECT member_emb_sum_blob, member_emb_count FROM categories "
+            "WHERE id = ?", (category_id,),
+        ).fetchone()
+        count = row["member_emb_count"] or 0
+        if count == 0:
+            return None
+    sum_vec = _unpack_sum(row["member_emb_sum_blob"])
+    mean = [s / count for s in sum_vec]
+    _normalize(mean)
+    return mean
+
+
+def update_category_embedding(conn, category_id, embedder=None):
+    """Refresh a category's `category_vec` entry as a blend of its
+    static anchor and the cached member mean.
+
+    Blend keeps the declared intent in charge (see ANCHOR_WEIGHT
+    docstring). Cheap now — derived from the cached (sum, count) rather
+    than a JOIN over painpoint_vec. Callers that move members call
+    `add_member_to_centroid` / `remove_member_from_centroid` before
+    this, or `rebuild_centroid_from_members` for bulk changes.
+
+    Precedence:
+    - anchor AND mean → blend
+    - anchor only → anchor
+    - mean only (legacy without anchor) → mean
+    - neither → remove category_vec row
+    """
+    del embedder  # unused — kept for API compatibility with older callers
     uncat_row = conn.execute(
         "SELECT id FROM categories WHERE name = 'Uncategorized'"
     ).fetchone()
     if uncat_row and uncat_row["id"] == category_id:
-        # Make sure we don't have a stale vec entry from before this guard.
         conn.execute("DELETE FROM category_vec WHERE rowid = ?", (category_id,))
         return
 
-    # Pull every member's embedding in a single JOIN — was a per-member
-    # SELECT (N+1) before; now one round-trip regardless of category size.
-    expected_bytes = EMBEDDING_DIM * 4  # float32 = 4 bytes
-    rows = conn.execute("""
-        SELECT pv.rowid AS pp_id, pv.embedding
-        FROM painpoint_vec pv
-        JOIN painpoints p ON p.id = pv.rowid
-        WHERE p.category_id = ?
-    """, (category_id,)).fetchall()
+    anchor = get_category_anchor(conn, category_id)
+    mean = _member_mean_from_cache(conn, category_id)
 
-    if not rows:
+    if anchor is None and mean is None:
         conn.execute(
             "DELETE FROM category_vec WHERE rowid = ?", (category_id,)
         )
         return
 
-    accum = [0.0] * EMBEDDING_DIM
-    count = 0
-    for row in rows:
-        pp_id = row["pp_id"]
-        blob = row["embedding"]
-        if len(blob) != expected_bytes:
-            # Dimension mismatch (stale embedding from a different model).
-            # Skip this painpoint rather than crash the whole centroid calc.
-            import logging
-            logging.getLogger(__name__).warning(
-                "painpoint_vec rowid=%s has %d bytes, expected %d "
-                "(dimension mismatch — skipping in centroid)",
-                pp_id, len(blob), expected_bytes,
-            )
-            continue
-        try:
-            emb = struct.unpack(f"{EMBEDDING_DIM}f", blob)
-        except struct.error as e:
-            import logging
-            logging.getLogger(__name__).warning(
-                "painpoint_vec rowid=%s unpack failed: %s — skipping", pp_id, e,
-            )
-            continue
-        for i in range(EMBEDDING_DIM):
-            accum[i] += emb[i]
-        count += 1
-
-    if count == 0:
-        conn.execute(
-            "DELETE FROM category_vec WHERE rowid = ?", (category_id,)
-        )
-        return
-
-    # Average and normalize
-    for i in range(EMBEDDING_DIM):
-        accum[i] /= count
-    norm = math.sqrt(sum(x * x for x in accum))
-    if norm > 0:
-        accum = [x / norm for x in accum]
-
-    store_category_embedding(conn, category_id, accum)
+    if anchor is not None and mean is not None:
+        blended = [
+            ANCHOR_WEIGHT * anchor[i] + (1.0 - ANCHOR_WEIGHT) * mean[i]
+            for i in range(EMBEDDING_DIM)
+        ]
+        _normalize(blended)
+        store_category_embedding(conn, category_id, blended)
+    elif anchor is not None:
+        store_category_embedding(conn, category_id, anchor)
+    else:
+        store_category_embedding(conn, category_id, mean)
+    conn.execute(
+        "UPDATE categories SET centroid_updated_at = ? WHERE id = ?",
+        (_now_iso(), category_id),
+    )

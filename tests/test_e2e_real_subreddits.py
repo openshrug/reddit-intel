@@ -147,20 +147,17 @@ class TestRealSubreddits:
         conn = db.get_db()
         try:
             rows = conn.execute("""
-                SELECT p.id, p.title, p.description, p.severity, p.signal_count,
-                       p.relevance, c.name AS cat, pc.name AS parent_cat
+                SELECT p.id, p.title, p.description, p.severity, p.signal_count, c.name AS cat, pc.name AS parent_cat
                 FROM painpoints p
                 LEFT JOIN categories c ON c.id = p.category_id
                 LEFT JOIN categories pc ON pc.id = c.parent_id
-                ORDER BY p.relevance DESC NULLS LAST, p.signal_count DESC
                 LIMIT 50
             """).fetchall()
 
             for r in rows:
-                rel = f"{r['relevance']:.2f}" if r['relevance'] else "NULL"
                 cat_path = (f"{r['parent_cat']} > {r['cat']}"
                             if r['parent_cat'] else (r['cat'] or "?"))
-                print(f"\n  [{r['id']}] rel={rel} sig={r['signal_count']} sev={r['severity']} "
+                print(f"\n  [{r['id']}] sig={r['signal_count']} sev={r['severity']} "
                       f"| {cat_path}")
                 print(f"      TITLE: {r['title']}")
                 if r['description']:
@@ -264,15 +261,13 @@ def _print_category(conn, cat_id, indent):
 
     # Print painpoints directly in this category
     pps = conn.execute("""
-        SELECT id, title, severity, signal_count, relevance
+        SELECT id, title, severity, signal_count
         FROM painpoints WHERE category_id = ?
-        ORDER BY relevance DESC NULLS LAST, signal_count DESC
     """, (cat_id,)).fetchall()
 
     for p in pps:
-        rel = f"{p['relevance']:.2f}" if p['relevance'] else "NULL"
         print(f"{prefix}📌 [{p['id']}] {p['title'][:75]}")
-        print(f"{prefix}    sig={p['signal_count']} sev={p['severity']} rel={rel}")
+        print(f"{prefix}    sig={p['signal_count']} sev={p['severity']}")
 
         # Show up to 2 source samples
         sources = conn.execute("""
