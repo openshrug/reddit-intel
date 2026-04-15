@@ -19,8 +19,8 @@ from llm import get_client, llm_call, TokenCounter
 log = logging.getLogger(__name__)
 
 # --- Tunables ---
-MODEL = "gpt-4.1-mini"
-REASONING_EFFORT = None   # gpt-4.1-mini is non-reasoning, much faster
+MODEL = "gpt-5-nano"
+REASONING_EFFORT = "low"
 BATCH_TOKEN_BUDGET = 2_000
 LLM_CONCURRENCY = 40
 
@@ -30,7 +30,7 @@ LLM_CONCURRENCY = 40
 class ExtractedPainpoint(BaseModel):
     title: str = Field(description="Concise name revealing the essence of the pain")
     description: str = Field(description="1-2 sentence explanation of the pain")
-    severity: int = Field(ge=1, le=10, description="1 = minor annoyance, 10 = blocking/critical, 5 - moderate annoyance, but not blocking")
+    severity: int = Field(ge=1, le=10, description="1 = trivial inconvenience, 3 = recurring annoyance, 5 = significant friction affecting routine, 7 = major disruption or emotional distress, 10 = totally blocking")
     quoted_text: str = Field(description="Brief key phrase (under 5 words) copied verbatim from the source post or comment that anchors this painpoint")
     category_name: str = Field(description="Must match a category from the taxonomy, or 'Uncategorized'")
     post_id: int = Field(description="The [Post N] ID from the input")
@@ -46,8 +46,7 @@ class ExtractionResult(BaseModel):
 EXTRACT_INSTRUCTIONS = """\
 You are a painpoint extraction engine for product research. You will \
 receive Reddit posts with their comments. Your job is to identify user \
-painpoints that someone could build a product, app, or service around — \
-ideally one with viral / mass-appeal potential, not just developer tools.
+painpoints that someone could build a product, app, or service around.
 
 Keep painpoints that meet BOTH of these:
 - APP-ADDRESSABLE: a mobile app, web app, browser extension, API, or \
@@ -67,7 +66,6 @@ Skip painpoints that are:
 - Pure opinions, memes, jokes, or sarcasm with no real pain behind them.
 - Philosophical or political takes with no product hook ("AI will take our \
 jobs", "society is broken").
-- Pure pricing/business-model complaints (unless they reveal a feature gap).
 - Company drama / platform politics with no product angle.
 
 Rules:
