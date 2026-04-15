@@ -84,8 +84,82 @@ from the source — pick the most distinctive words that anchor this painpoint.
 # Public API
 # ============================================================
 
+async def extract_painpoints_from_posts(
+    posts_with_comments,
+    categories,
+    *,
+    batch_token_budget=BATCH_TOKEN_BUDGET,
+):
+    """Pure in-memory painpoint extraction — no DB access.
+
+    Dict-in, dict-out. Use this when the caller owns its own storage
+    (e.g. the closed backend writes results straight to Postgres rather
+    than going through engine's SQLite).
+
+    Args:
+        posts_with_comments: list of post dicts. Each post must have the
+            same fields as ``reddit_scraper.scrape_subreddit_full``
+            output (``id``, ``title``, ``selftext``, ``subreddit``,
+            ``score``, ``num_comments``) plus a ``comments`` list of
+            comment dicts with ``id``, ``body``, ``score``.
+
+            The ``id`` on posts and comments is referenced by the LLM in
+            its output (``post_id`` / ``comment_id`` fields on returned
+            pendings). Callers that don't already have persisted IDs can
+            assign any stable integers here and map back after.
+        categories: list of category dicts with ``path`` (or ``name``)
+            and ``description`` keys, used to build the taxonomy section
+            of the LLM prompt. Pass ``[]`` to extract with a
+            taxonomy-free prompt; the LLM will label everything
+            ``Uncategorized`` and the caller can re-assign categories
+            later via embedding similarity.
+        batch_token_budget: target token count per LLM batch.
+
+    Returns:
+        Tuple of (list of pending-painpoint dicts, token usage dict).
+        Each pending dict has: ``title``, ``description``, ``severity``,
+        ``quoted_text``, ``category_name``, ``post_id``,
+        ``comment_id?``. No DB side effects.
+    """
+    if not posts_with_comments:
+        return [], TokenCounter().as_dict()
+
+    # Internal helpers take (post, comments) tuples; callers pass
+    # posts-with-nested-comments. One-time unpack here.
+    tuples = [(p, p.get("comments", []) or []) for p in posts_with_comments]
+
+    batches = _build_batches(tuples, batch_token_budget)
+    log.info("extract: %d posts -> %d batches (budget %dK tokens)",
+             len(posts_with_comments), len(batches), batch_token_budget // 1000)
+
+    instructions = _build_instructions_from_categories(categories)
+    client = get_client()
+    sem = asyncio.Semaphore(LLM_CONCURRENCY)
+    counter = TokenCounter()
+
+    batch_results = await asyncio.gather(
+        *(_process_batch(i, len(batches), b, client, instructions, sem, counter)
+          for i, b in enumerate(batches))
+    )
+
+    items = [item for batch_items in batch_results for item in batch_items]
+
+    usage = counter.as_dict()
+    log.info("extract: tokens — input: %d, output: %d (reasoning: %d, text: %d)",
+             usage["input_tokens"], usage["output_tokens"],
+             usage["reasoning_tokens"], usage["text_tokens"])
+
+    return items, usage
+
+
 async def extract_painpoints(post_ids, *, batch_token_budget=BATCH_TOKEN_BUDGET):
     """Extract painpoints from persisted posts via LLM.
+
+    SQLite-backed entry point — reads posts from engine's DB, calls the
+    pure extractor, writes pendings back. Used by the solo-agent
+    pipeline and existing tests. Downstream consumers that own their
+    own storage should call ``extract_painpoints_from_posts`` directly
+    instead.
 
     Args:
         post_ids: list of internal post IDs (from posts.id).
@@ -102,27 +176,16 @@ async def extract_painpoints(post_ids, *, batch_token_budget=BATCH_TOKEN_BUDGET)
         log.info("extract: all posts already extracted, skipping")
         return [], TokenCounter().as_dict()
 
+    # Fetch from engine SQLite, reshape into posts-with-nested-comments
+    # so the pure extractor can consume it.
     posts_with_comments = _load_posts_with_comments(post_ids)
-    batches = _build_batches(posts_with_comments, batch_token_budget)
-    log.info("extract: %d posts -> %d batches (budget %dK tokens)",
-             len(post_ids), len(batches), batch_token_budget // 1000)
+    post_dicts = [{**post, "comments": comments}
+                  for post, comments in posts_with_comments]
+    categories = get_category_list_flat()
 
-    instructions = _build_instructions()
-    client = get_client()
-    sem = asyncio.Semaphore(LLM_CONCURRENCY)
-    counter = TokenCounter()
-
-    batch_results = await asyncio.gather(
-        *(_process_batch(i, len(batches), b, client, instructions, sem, counter)
-          for i, b in enumerate(batches))
+    items, usage = await extract_painpoints_from_posts(
+        post_dicts, categories, batch_token_budget=batch_token_budget,
     )
-
-    items = [item for batch_items in batch_results for item in batch_items]
-
-    usage = counter.as_dict()
-    log.info("extract: tokens — input: %d, output: %d (reasoning: %d, text: %d)",
-             usage["input_tokens"], usage["output_tokens"],
-             usage["reasoning_tokens"], usage["text_tokens"])
 
     if not items:
         log.info("extract: no painpoints found")
@@ -271,11 +334,22 @@ def _build_batches(posts_with_comments, budget):
 
 
 def _build_instructions():
-    """Build the system-level instructions with the current category taxonomy."""
-    categories = get_category_list_flat()
+    """Legacy: build instructions with taxonomy read from engine SQLite."""
+    return _build_instructions_from_categories(get_category_list_flat())
+
+
+def _build_instructions_from_categories(categories):
+    """Pure variant — caller supplies the category list.
+
+    Accepts either ``{path, description}`` (as returned by engine's
+    ``get_category_list_flat``) or ``{name, description}`` (convenient
+    for callers that don't build a hierarchical path). Missing keys
+    fall back gracefully so both shapes work.
+    """
     if categories:
         taxonomy_lines = [
-            f"- {c['path']}: {c['description'] or '(no description)'}"
+            f"- {c.get('path') or c.get('name', '?')}: "
+            f"{c.get('description') or '(no description)'}"
             for c in categories
         ]
         taxonomy = "\n".join(taxonomy_lines)

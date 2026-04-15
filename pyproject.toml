@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "reddit-intel"
+version = "0.2.0"
+description = "Scrape Reddit, extract painpoints via LLM, build a self-maintaining category taxonomy."
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.28.0",
+    "openai>=1.66.0",
+    "pydantic>=2.0.0",
+    "python-dotenv>=1.0.0",
+    "pyyaml>=6.0",
+    "requests>=2.31.0",
+    "sqlite-vec>=0.1.0",
+]
+
+[project.optional-dependencies]
+demo = [
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.29.0",
+    "jinja2>=3.1.0",
+    "python-multipart>=0.0.9",
+]
+test = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+]
+
+# Flat-layout packaging: engine's modules live at repo root rather than
+# inside a single top-level package dir. Explicit py-modules + packages
+# list is required because setuptools' auto-discovery would otherwise
+# pick up tests/, scrape_dumps/, etc. as packages.
+#
+# Data files (taxonomy.yaml, config.json, db/schema.sql) are resolved at
+# runtime via Path(__file__).parent, which works for editable installs
+# (pip install -e .). For a built wheel, MANIFEST.in / package-data would
+# be needed — add that when non-editable installs become a real use case.
+[tool.setuptools]
+py-modules = [
+    "reddit_scraper",
+    "subreddit_pipeline",
+    "promoter",
+    "category_worker",
+    "llm",
+    "subriff_scraper",
+]
+packages = ["db", "painpoint_extraction"]

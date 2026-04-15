@@ -487,7 +487,40 @@ it was "cascade from earlier merge" vs "apply error: foo".
 
 ---
 
-## 12. First steps for a new agent
+## 12. Public API (for downstream consumers)
+
+This repo is installable as a library (`pip install -e .`). Downstream
+consumers — specifically the closed `reddit-intel-closed` backend — import
+a small, stable surface from here. Treat these symbols as a
+**semver-stable public API**:
+
+| Symbol                                      | Used for                                  |
+| ------------------------------------------- | ----------------------------------------- |
+| `reddit_scraper.scrape_subreddit_full`      | Own-API Reddit scrape (OAuth, 60 rpm)     |
+| `painpoint_extraction.extract_painpoints`   | LLM extraction with engine SQLite I/O (solo-agent path) |
+| `painpoint_extraction.extract_painpoints_from_posts` | Pure dict-in / dict-out extraction (no DB) — for consumers with their own storage |
+| `db.embeddings.OpenAIEmbedder`              | 1536-dim embeddings, `embed` + `embed_batch` |
+| `llm.OPENAI_API_SEMAPHORE`                  | Module-global concurrency cap — downstream may swap this for a distributed implementation at process boot |
+| Pending-painpoint dict shape (fields: `title`, `description`, `severity`, `quoted_text`, `category_name`, `post_id`, `comment_id?`) | Data handoff from `extract_painpoints` |
+
+**Stability rules:**
+
+- Rename / remove / break the shape of any of the above → **major**
+  version bump.
+- Additive change (new field on the pending dict, new helper) → **minor**
+  bump. Consumers ignore unknown fields.
+- Any other internal refactor → **patch** bump.
+
+**Everything else is internal.** `db/painpoints.py`, `db/category_events.py`,
+`db/categories.py`, `db/category_clustering.py`, `db/relevance.py`,
+`db/locks.py`, `db/queries.py`, `promoter.py`, `category_worker.py`
+are NOT part of the public API. They're free to refactor at will; the
+closed backend reimplements the merge + taxonomy logic on Postgres
+rather than importing these.
+
+---
+
+## 13. First steps for a new agent
 
 1. Skim `subreddit_pipeline.analyze` — ~70 lines, the canonical "what
    does one run look like" reference.
