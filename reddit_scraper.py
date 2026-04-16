@@ -370,6 +370,7 @@ async def scrape_subreddit_full(subreddit, *, posts_per_window=POSTS_PER_WINDOW,
 
 if __name__ == "__main__":
     import sys
+
     from dotenv import load_dotenv
     load_dotenv()
     logging.basicConfig(level=logging.INFO)

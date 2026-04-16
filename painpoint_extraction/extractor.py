@@ -13,8 +13,8 @@ from pydantic import BaseModel, Field
 from db import get_db
 from db.categories import get_category_list_flat
 from db.painpoints import save_pending_painpoints_batch
-from db.posts import get_posts_by_ids, get_comments_for_post
-from llm import get_client, llm_call, TokenCounter
+from db.posts import get_comments_for_post, get_posts_by_ids
+from llm import TokenCounter, get_client, llm_call
 
 log = logging.getLogger(__name__)
 

@@ -7,16 +7,16 @@ pre-populated llm_result), priority ordering, max_reviews cap.
 import pytest
 
 import db
+from db.category_events import (
+    apply_with_test,
+    propose_uncategorized_singleton_events,
+)
 from db.embeddings import (
     FakeEmbedder,
     get_category_anchor,
     store_painpoint_embedding,
 )
 from db.llm_naming import FakeNamer, UncatDecision
-from db.category_events import (
-    apply_with_test,
-    propose_uncategorized_singleton_events,
-)
 
 
 @pytest.fixture

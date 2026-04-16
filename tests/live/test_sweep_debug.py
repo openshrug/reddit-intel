@@ -6,7 +6,6 @@ Run with:  pytest tests/test_sweep_debug.py -v -s
 
 import asyncio
 import os
-import textwrap
 
 import pytest
 from dotenv import load_dotenv
@@ -14,22 +13,21 @@ from dotenv import load_dotenv
 load_dotenv(override=True)
 
 import db
-from subreddit_pipeline import analyze
-from db.category_clustering import cluster_painpoints, category_member_titles
+from db.category_clustering import category_member_titles, cluster_painpoints
 from db.category_events import (
     CATEGORY_STALE_DAYS,
+    MERGE_CATEGORY_THRESHOLD,
     MIN_SUB_CLUSTER_SIZE,
     SPLIT_RECHECK_DELTA,
-    MERGE_CATEGORY_THRESHOLD,
     UNCATEGORIZED_NAME,
     _category_last_activity,
 )
 from db.embeddings import (
-    OpenAIEmbedder,
     CATEGORY_COSINE_THRESHOLD,
     MERGE_COSINE_THRESHOLD,
+    OpenAIEmbedder,
 )
-
+from subreddit_pipeline import analyze
 
 SUBREDDITS = [
     "iOSAppsMarketing",
@@ -74,7 +72,7 @@ class TestSweepDebug:
         print("\n" + "=" * 100)
         print("SWEEP DEBUG — instrumented per-step analysis")
         print("=" * 100)
-        print(f"\nTUNABLES:")
+        print("\nTUNABLES:")
         print(f"  MERGE_COSINE_THRESHOLD    = {MERGE_COSINE_THRESHOLD}  (promote-time link + sweep clustering)")
         print(f"  CATEGORY_COSINE_THRESHOLD = {CATEGORY_COSINE_THRESHOLD}  (min sim for find_best_category)")
         print(f"  MIN_SUB_CLUSTER_SIZE      = {MIN_SUB_CLUSTER_SIZE}")
@@ -221,6 +219,7 @@ class TestSweepDebug:
         print("NEW IDEA: painpoints with weak similarity to their assigned category")
         print("-" * 100)
         import struct
+
         from db.embeddings import EMBEDDING_DIM
 
         # For each painpoint, compute cosine sim between its embedding and its category's embedding
@@ -257,12 +256,12 @@ class TestSweepDebug:
                 mismatches.append((sim, r["id"], r["title"], r["cat_name"]))
 
         mismatches.sort()
-        print(f"\n  Painpoints with cosine sim < 0.35 to their category (top 30 worst):")
+        print("\n  Painpoints with cosine sim < 0.35 to their category (top 30 worst):")
         for sim, pp_id, title, cat in mismatches[:30]:
             print(f"    [{pp_id}] sim={sim:.3f} '{title[:60]}' → category: {cat}")
 
         print(f"\n  Total misplaced painpoints: {len(mismatches)}")
-        print(f"  If we move all these to Uncategorized and cluster, we might get new categories.")
+        print("  If we move all these to Uncategorized and cluster, we might get new categories.")
 
         conn.close()
 

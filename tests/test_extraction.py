@@ -14,7 +14,6 @@ import asyncio
 
 from painpoint_extraction.extractor import _fix_attribution
 
-
 # ===========================================================================
 # Helpers
 # ===========================================================================
@@ -119,6 +118,7 @@ class TestExtractFromPosts:
         """Replace llm_call with a stub that emits one painpoint per
         ``[Post N]`` marker it finds in the rendered batch text."""
         import re
+
         from painpoint_extraction import extractor as ext
 
         def fake(client, instructions, batch_text, *, response_model,
@@ -179,8 +179,8 @@ class TestExtractFromPosts:
         category dicts get surfaced in the system instructions — so
         callers don't have to build the hierarchical path string
         themselves."""
-        from painpoint_extraction import extractor as ext
         from painpoint_extraction import extract_painpoints_from_posts
+        from painpoint_extraction import extractor as ext
 
         captured = {}
         def capturing(client, instructions, batch_text, *, response_model,
@@ -205,8 +205,8 @@ class TestExtractFromPosts:
         assert "wellness" in captured["instructions"]
 
     def test_empty_categories_falls_back_to_uncategorized(self, monkeypatch):
-        from painpoint_extraction import extractor as ext
         from painpoint_extraction import extract_painpoints_from_posts
+        from painpoint_extraction import extractor as ext
 
         captured = {}
         def capturing(client, instructions, batch_text, *, response_model,

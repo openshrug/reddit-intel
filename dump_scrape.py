@@ -37,25 +37,25 @@ def dump_readable(posts: list[dict], subreddit: str, elapsed: float):
     md_path = base.with_suffix(".md")
     lines = [
         f"# r/{subreddit} — scrape dump",
-        f"",
+        "",
         f"- **Date:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         f"- **Posts:** {len(posts)}",
         f"- **Posts with comments:** {sum(1 for p in posts if p.get('comments'))}",
         f"- **Total comments:** {sum(len(p.get('comments', [])) for p in posts)}",
         f"- **Scrape time:** {elapsed:.1f}s",
-        f"",
-        f"---",
-        f"",
+        "",
+        "---",
+        "",
     ]
 
     for i, p in enumerate(posts, 1):
         comments = p.get("comments", [])
         lines.append(f"## {i}. {p['title']}")
-        lines.append(f"")
+        lines.append("")
         lines.append(
-            f"| Field | Value |"
+            "| Field | Value |"
         )
-        lines.append(f"|---|---|")
+        lines.append("|---|---|")
         lines.append(f"| Reddit ID | `{p.get('name', '')}` |")
         lines.append(f"| Author | u/{p.get('author', '?')} |")
         lines.append(f"| Score | {p.get('score', 0)} |")
@@ -65,20 +65,20 @@ def dump_readable(posts: list[dict], subreddit: str, elapsed: float):
         lines.append(f"| Created | {_ts(p.get('created_utc'))} UTC |")
         lines.append(f"| Flair | {p.get('link_flair_text', '') or '—'} |")
         lines.append(f"| Permalink | {p.get('permalink', '')} |")
-        lines.append(f"")
+        lines.append("")
 
         body = p.get("selftext", "").strip()
         if body:
             lines.append(f"**Post body** ({len(body)} chars):")
-            lines.append(f"")
+            lines.append("")
             lines.append(f"> {body[:3000]}")
             if len(body) > 3000:
                 lines.append(f"> ... (truncated, {len(body)} total chars)")
-            lines.append(f"")
+            lines.append("")
 
         if comments:
             lines.append(f"### Comments ({len(comments)})")
-            lines.append(f"")
+            lines.append("")
             for j, c in enumerate(comments, 1):
                 cbody = c.get("body", "").strip()
                 lines.append(
@@ -87,17 +87,17 @@ def dump_readable(posts: list[dict], subreddit: str, elapsed: float):
                     f"depth {c.get('depth', 0)} · "
                     f"{_ts(c.get('created_utc'))} UTC"
                 )
-                lines.append(f"")
+                lines.append("")
                 lines.append(f"> {cbody[:1500]}")
                 if len(cbody) > 1500:
                     lines.append(f"> ... (truncated, {len(cbody)} total chars)")
-                lines.append(f"")
+                lines.append("")
 
-        lines.append(f"---")
-        lines.append(f"")
+        lines.append("---")
+        lines.append("")
 
     md_path.write_text("\n".join(lines), encoding="utf-8")
-    print(f"\nDumped to:")
+    print("\nDumped to:")
     print(f"  Markdown: {md_path}")
     print(f"  JSON:     {json_path}")
 

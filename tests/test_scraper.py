@@ -12,9 +12,9 @@ import pytest
 
 from reddit_scraper import (
     BACKOFF_BASE,
+    COMMENT_FIELDS,
     MAX_RETRIES,
     POST_FIELDS,
-    COMMENT_FIELDS,
     _dedup_and_rank,
     _parse_comment,
     _parse_post,
@@ -23,7 +23,6 @@ from reddit_scraper import (
     scrape_subreddit,
     scrape_subreddit_full,
 )
-
 
 # ===================================================================
 # Helpers — fake Reddit API responses

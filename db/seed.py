@@ -2,7 +2,7 @@ from pathlib import Path
 
 import yaml
 
-from . import get_db, _now
+from . import _now, get_db
 
 TAXONOMY_FILE = Path(__file__).parents[1] / "taxonomy.yaml"
 

@@ -1,7 +1,7 @@
 import json
 import sqlite3
 
-from . import get_db, _now
+from . import _now, get_db
 
 
 def upsert_post(post_data):

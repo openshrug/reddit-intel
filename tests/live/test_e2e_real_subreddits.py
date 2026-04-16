@@ -25,11 +25,11 @@ import db
 
 # Debug-only: smaller scrape so we iterate faster. Revert before commit.
 import reddit_scraper as _rs
+
 _rs.POSTS_PER_WINDOW = 30
 _rs.POSTS_WITH_COMMENTS = 15
 
 from subreddit_pipeline import analyze
-
 
 SUBREDDITS = [
     "iOSAppsMarketing",
@@ -107,8 +107,8 @@ class TestRealSubreddits:
         print("=" * 100)
 
         from category_worker import run_sweep
-        from db.llm_naming import LLMNamer
         from db.embeddings import OpenAIEmbedder
+        from db.llm_naming import LLMNamer
 
         sweep_summary = run_sweep(namer=LLMNamer(), embedder=OpenAIEmbedder())
         print(f"  Sweep: {sweep_summary}")

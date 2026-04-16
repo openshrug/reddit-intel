@@ -8,7 +8,6 @@ Requires OPENAI_API_KEY in .env.
 
 import json
 import os
-import threading
 import time
 
 import pytest
@@ -17,19 +16,17 @@ from dotenv import load_dotenv
 load_dotenv(override=True)
 
 import db
-from db.posts import upsert_post
+from category_worker import run_sweep
+from db.embeddings import OpenAIEmbedder
+from db.llm_naming import LLMNamer
 from db.painpoints import (
+    add_pending_source,
     get_uncategorized_id,
     promote_pending,
     save_pending_painpoint,
-    add_pending_source,
 )
+from db.posts import upsert_post
 from db.relevance import per_source_relevance
-from db.embeddings import OpenAIEmbedder
-from db.llm_naming import LLMNamer
-from db.locks import merge_lock
-from category_worker import run_sweep
-
 
 requires_api = pytest.mark.skipif(
     not os.getenv("OPENAI_API_KEY") or "your-" in os.getenv("OPENAI_API_KEY", ""),
@@ -250,6 +247,7 @@ class TestLiveEndToEnd:
                             age_days=200, score=2)
             # Backdate last_updated so the staleness-based delete sweep fires.
             from datetime import datetime, timedelta, timezone
+
             from db.category_events import CATEGORY_STALE_DAYS
             stale_ts = (
                 datetime.now(timezone.utc)
@@ -263,7 +261,7 @@ class TestLiveEndToEnd:
                 conn.commit()
             finally:
                 conn.close()
-        print(f"  Dead category seeded: DeadCat-Legacy (3 stale members)")
+        print("  Dead category seeded: DeadCat-Legacy (3 stale members)")
 
         # Bloated category to split
         conn = db.get_db()
@@ -293,7 +291,7 @@ class TestLiveEndToEnd:
         ]
         for title in docker_titles + npm_titles:
             _seed_pp_in_cat(bloat_id, title, 7)
-        print(f"  Bloated category seeded: MixedDevOps (10 members: Docker × 5 + npm × 5)")
+        print("  Bloated category seeded: MixedDevOps (10 members: Docker × 5 + npm × 5)")
 
         # Merge siblings
         conn = db.get_db()
@@ -315,10 +313,10 @@ class TestLiveEndToEnd:
         _seed_pp_in_cat(sib_a, "Redis cache eviction aggressive production workload", 7)
         _seed_pp_in_cat(sib_b, "Redis cache eviction policy too aggressive prod env", 7)
         _seed_pp_in_cat(sib_b, "Redis cache eviction aggressive for production use", 7)
-        print(f"  Merge siblings seeded: Redis-Caching-Issues (2) + Redis-Cache-Problems (2)")
+        print("  Merge siblings seeded: Redis-Caching-Issues (2) + Redis-Cache-Problems (2)")
 
         # Run the sweep with REAL LLM naming
-        print(f"\n  Running sweep with real LLM...")
+        print("\n  Running sweep with real LLM...")
         summary = run_sweep(namer=namer, embedder=embedder)
         print(f"  Sweep: {json.dumps(summary, indent=4)}")
 
@@ -387,7 +385,7 @@ class TestLiveEndToEnd:
                       f"{e['metric_name']}={e['metric_value']:.3f} "
                       f"(thr={e['threshold']:.3f}) {e['reason']}")
 
-            print(f"\n  INTEGRITY:")
+            print("\n  INTEGRITY:")
             orphans = conn.execute(
                 "SELECT COUNT(*) FROM pending_painpoints pp "
                 "LEFT JOIN painpoint_sources ps ON ps.pending_painpoint_id = pp.id "

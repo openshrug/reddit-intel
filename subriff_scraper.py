@@ -1,6 +1,5 @@
 import requests
 
-
 SUBRIFF_API = "https://subriff.com/Home/GetSubreddits"
 
 

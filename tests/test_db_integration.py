@@ -6,18 +6,16 @@ Run with:  pytest tests/test_db_integration.py -v
 """
 
 import sqlite3
-import tempfile
-from pathlib import Path
 
 import pytest
 
 import db
-from db.posts import upsert_post, upsert_comment, get_post_by_reddit_id, get_comments_for_post
 from db.painpoints import (
+    get_unmerged_pending,
     save_pending_painpoint,
     save_pending_painpoints_batch,
-    get_unmerged_pending,
 )
+from db.posts import get_comments_for_post, get_post_by_reddit_id, upsert_comment, upsert_post
 
 
 # The Layer A multi-match merging helpers (`merge_pending_into_painpoint`,
@@ -72,19 +70,19 @@ def _test_merge_pending(pending_ids, *, title, description="", severity=5,
     finally:
         conn.close()
 from db.categories import (
+    get_all_categories,
     get_category_by_name,
     get_category_id_by_name,
     get_category_list_flat,
-    get_all_categories,
     get_root_categories,
 )
 from db.queries import (
-    get_top_painpoints,
     get_painpoint_evidence,
     get_painpoints_by_category,
     get_painpoints_by_subreddit,
-    get_subreddit_summary,
     get_stats,
+    get_subreddit_summary,
+    get_top_painpoints,
     run_sql,
 )
 

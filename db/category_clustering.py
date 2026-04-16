@@ -16,8 +16,6 @@ from . import in_clause_placeholders
 from .embeddings import (
     EMBEDDING_DIM,
     FakeEmbedder,
-    _pack_embedding,
-    MERGE_COSINE_THRESHOLD,
 )
 
 

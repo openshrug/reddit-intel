@@ -20,33 +20,26 @@ import time
 import pytest
 
 import db
-from db.posts import upsert_post, upsert_comment
+from category_worker import run_sweep
+from db.category_clustering import cluster_painpoints
+from db.category_events import (
+    CATEGORY_STALE_DAYS,
+    propose_split_events,
+)
+from db.embeddings import (
+    MERGE_COSINE_THRESHOLD,
+    FakeEmbedder,
+)
+from db.llm_naming import FakeNamer
+from db.locks import merge_lock
 from db.painpoints import (
     add_pending_source,
     get_uncategorized_id,
     promote_pending,
     save_pending_painpoint,
 )
+from db.posts import upsert_comment, upsert_post
 from db.relevance import per_source_relevance
-from db.embeddings import (
-    MERGE_COSINE_THRESHOLD,
-    FakeEmbedder,
-)
-from db.category_clustering import cluster_painpoints, inter_category_similarity
-from db.category_events import (
-    CATEGORY_STALE_DAYS,
-    MIN_SUB_CLUSTER_SIZE,
-    SPLIT_RECHECK_DELTA,
-    apply_with_test,
-    propose_delete_events,
-    propose_merge_events,
-    propose_split_events,
-    propose_uncategorized_events,
-)
-from db.llm_naming import FakeNamer
-from db.locks import merge_lock
-from category_worker import run_sweep
-
 
 # ===========================================================================
 # Fixtures
@@ -220,7 +213,6 @@ class TestEmbeddingSimilarity:
         a = embedder.embed("GitHub Actions timeout on monorepo builds")
         b = embedder.embed("GitHub Actions timeout on monorepo CI")
         # Compute cosine sim
-        import math
         dot = sum(x * y for x, y in zip(a, b))
         assert dot >= MERGE_COSINE_THRESHOLD
 
@@ -654,8 +646,8 @@ class TestSplitTriggerDiscipline:
         split) — not when the LLM call fails. Use a FakeNamer that
         returns a 'keep' decision so we can verify the snapshot updates
         without needing the real LLM."""
+
         from db.llm_naming import FakeNamer
-        from pydantic import BaseModel
 
         # Build a namer that returns a structured "keep" decision.
         class KeepNamer(FakeNamer):
@@ -850,7 +842,7 @@ class TestMergeTest:
 
     def test_similar_siblings_merged(self, fresh_db):
         embedder = FakeEmbedder()
-        from db.embeddings import store_painpoint_embedding, store_category_embedding
+        from db.embeddings import store_category_embedding, store_painpoint_embedding
         conn = db.get_db()
         try:
             parent_cat = conn.execute(
@@ -920,7 +912,7 @@ class TestMergeTest:
 
     def test_unrelated_siblings_not_merged(self, fresh_db):
         embedder = FakeEmbedder()
-        from db.embeddings import store_painpoint_embedding, store_category_embedding
+        from db.embeddings import store_category_embedding, store_painpoint_embedding
         conn = db.get_db()
         try:
             parent_cat = conn.execute(
@@ -1296,7 +1288,7 @@ class TestStressNoDeadlocks:
 
         for t in promoter_threads:
             t.join(timeout=self.HARD_TIMEOUT_SEC)
-            assert not t.is_alive(), f"promoter thread hung: likely deadlock"
+            assert not t.is_alive(), "promoter thread hung: likely deadlock"
         sweep_thread.join(timeout=self.HARD_TIMEOUT_SEC)
         assert not sweep_thread.is_alive(), "sweep thread hung: likely deadlock"
 
@@ -1661,6 +1653,7 @@ class TestFullLifecycleWithDecay:
         if embedder is None:
             embedder = FakeEmbedder()
         from datetime import datetime, timedelta, timezone
+
         from db.embeddings import store_painpoint_embedding
         ids = []
         # Stale categories get a `last_updated` timestamp matching their
@@ -2132,6 +2125,7 @@ class TestCategoryVecCleanup:
         → promote again. Must NOT raise IntegrityError from a dangling
         category_vec row pointing at the deleted category."""
         from datetime import datetime, timedelta, timezone
+
         from db.embeddings import FakeEmbedder, store_painpoint_embedding, update_category_embedding
 
         old_post = _make_post(
@@ -2197,7 +2191,9 @@ class TestUncategorizedNeverGetsCentroid:
 
     def test_update_category_embedding_skips_uncategorized(self, fresh_db):
         from db.embeddings import (
-            FakeEmbedder, store_painpoint_embedding, update_category_embedding,
+            FakeEmbedder,
+            store_painpoint_embedding,
+            update_category_embedding,
         )
         from db.painpoints import get_uncategorized_id
 
@@ -2238,7 +2234,8 @@ class TestUncategorizedNeverGetsCentroid:
         must not create a centroid."""
         from db.embeddings import FakeEmbedder
         from db.painpoints import (
-            _link_pending_to_painpoint, get_uncategorized_id,
+            _link_pending_to_painpoint,
+            get_uncategorized_id,
             save_pending_painpoint,
         )
 
@@ -2291,8 +2288,11 @@ class TestLinkRefreshesCategoryEmbedding:
         and match the current member set's centroid. Verifies the
         update_category_embedding call happens."""
         import struct
+
         from db.embeddings import (
-            EMBEDDING_DIM, FakeEmbedder, store_painpoint_embedding,
+            EMBEDDING_DIM,
+            FakeEmbedder,
+            store_painpoint_embedding,
             update_category_embedding,
         )
         from db.painpoints import _link_pending_to_painpoint, save_pending_painpoint
@@ -2389,10 +2389,10 @@ class TestDeleteRefreshesFallbackCentroid:
     pre-move member set and future find_best_category mis-routes."""
 
     def test_fallback_parent_centroid_refreshed(self, fresh_db):
-        import struct
         from db.category_events import CategoryEvent, _apply_delete_category
         from db.embeddings import (
-            EMBEDDING_DIM, FakeEmbedder, store_painpoint_embedding,
+            FakeEmbedder,
+            store_painpoint_embedding,
             update_category_embedding,
         )
 
@@ -2511,7 +2511,9 @@ class TestSplitRefreshesSourceCentroidWhenPartial:
     def test_partial_split_refreshes_source_centroid(self, fresh_db):
         from db.category_events import CategoryEvent, _apply_add_category_split
         from db.embeddings import (
-            FakeEmbedder, store_painpoint_embedding, update_category_embedding,
+            FakeEmbedder,
+            store_painpoint_embedding,
+            update_category_embedding,
         )
 
         emb = FakeEmbedder()
@@ -2621,8 +2623,11 @@ class TestDimensionMismatchTolerance:
 
     def test_update_category_embedding_skips_bad_blob(self, fresh_db, caplog):
         import logging
+
         from db.embeddings import (
-            FakeEmbedder, store_painpoint_embedding, update_category_embedding,
+            FakeEmbedder,
+            store_painpoint_embedding,
+            update_category_embedding,
         )
 
         emb = FakeEmbedder()
@@ -2764,6 +2769,7 @@ class TestRoundOfFixes:
         """If promote_pending raises TimeoutError, run_once should
         increment the count and continue — not propagate."""
         from unittest.mock import patch
+
         from promoter import run_once
 
         # Seed one pending pp
@@ -2781,7 +2787,7 @@ class TestRoundOfFixes:
     def test_pack_embedding_rejects_wrong_dimension(self, fresh_db):
         """A wrong-shape vector must fail loudly at pack time, not
         silently write a malformed BLOB."""
-        from db.embeddings import _pack_embedding, EMBEDDING_DIM
+        from db.embeddings import EMBEDDING_DIM, _pack_embedding
         with pytest.raises(ValueError, match="dimension mismatch"):
             _pack_embedding([0.0] * (EMBEDDING_DIM - 10))
         with pytest.raises(ValueError, match="dimension mismatch"):
@@ -2815,7 +2821,7 @@ class TestRoundOfFixes:
     def test_canonical_uncategorized_id(self, fresh_db):
         """db.uncategorized_id should be the canonical lookup —
         all the per-module copies should delegate to it."""
-        from db import uncategorized_id, UNCATEGORIZED_NAME
+        from db import UNCATEGORIZED_NAME, uncategorized_id
         from db.painpoints import get_uncategorized_id
 
         conn = db.get_db()
@@ -2837,9 +2843,9 @@ class TestRoundOfFixes:
         embedder. Verify by passing a tracking embedder that counts
         embed calls — should be 0 when all painpoints have stored vecs."""
         from db.embeddings import (
-            FakeEmbedder, store_painpoint_embedding, EMBEDDING_DIM,
+            FakeEmbedder,
+            store_painpoint_embedding,
         )
-        from db.category_clustering import cluster_painpoints
 
         emb = FakeEmbedder()
 
@@ -2889,6 +2895,7 @@ class TestRoundOfFixes:
         centroid is unchanged. Verify by patching update_category_embedding
         and confirming it isn't called from the link path."""
         from unittest.mock import patch
+
         from db.painpoints import _link_pending_to_painpoint
 
         # Seed one painpoint and one extra pending
@@ -2940,6 +2947,7 @@ class TestRoundOfFixes:
         """Two concurrent init_db() calls must not double-seed the
         taxonomy. Test with threads since processes would need temp dirs."""
         import threading
+
         from db.seed import seed_taxonomy
 
         # Wipe and re-init
@@ -2988,8 +2996,9 @@ class TestOpenAISemaphore:
         """If 20 threads try to embed at once, the semaphore must cap
         in-flight calls to its bound (default 10) — never more."""
         import threading
-        from llm import OPENAI_API_SEMAPHORE, OPENAI_CONCURRENCY
+
         from db.embeddings import OpenAIEmbedder
+        from llm import OPENAI_CONCURRENCY
 
         in_flight = [0]
         peak = [0]
@@ -3046,7 +3055,7 @@ class TestBootstrapBatchedEmbedding:
     def test_bootstrap_uses_single_batch_call(self, fresh_db):
         """For a fresh DB with the seeded taxonomy, bootstrap should
         result in exactly ONE call to embed_batch (not N to embed)."""
-        from db.embeddings import bootstrap_category_embeddings, FakeEmbedder
+        from db.embeddings import FakeEmbedder, bootstrap_category_embeddings
 
         # init_db() may have eagerly bootstrapped anchors if OPENAI_API_KEY
         # was set. Clear them so the counting embedder sees real work.
@@ -3093,7 +3102,7 @@ class TestBootstrapBatchedEmbedding:
     def test_bootstrap_idempotent(self, fresh_db):
         """Running bootstrap twice shouldn't re-embed already-bootstrapped
         categories. The second batch call should be empty (or skipped)."""
-        from db.embeddings import bootstrap_category_embeddings, FakeEmbedder
+        from db.embeddings import FakeEmbedder, bootstrap_category_embeddings
 
         # Clear any eagerly-bootstrapped anchors so the first call does real work.
         conn = db.get_db()
@@ -3142,8 +3151,11 @@ class TestUpdateCategoryEmbeddingSingleQuery:
         """The centroid value computed by the new JOIN-based code must
         match a manually-computed centroid from the same member set."""
         import struct
+
         from db.embeddings import (
-            EMBEDDING_DIM, FakeEmbedder, store_painpoint_embedding,
+            EMBEDDING_DIM,
+            FakeEmbedder,
+            store_painpoint_embedding,
             update_category_embedding,
         )
 
@@ -3226,9 +3238,12 @@ class TestParallelSplitDecision:
         If parallel: ~0.3s + overhead.
         Test asserts wall-clock under 0.6s (must be parallel)."""
         import threading
+
         from db.category_events import propose_split_events
         from db.embeddings import (
-            FakeEmbedder, store_painpoint_embedding, update_category_embedding,
+            FakeEmbedder,
+            store_painpoint_embedding,
+            update_category_embedding,
         )
 
         in_flight = [0]
@@ -3257,9 +3272,6 @@ class TestParallelSplitDecision:
 
         # Seed 3 separate categories, each over the SPLIT_RECHECK_DELTA
         # threshold, so all 3 trigger decide_split this sweep.
-        from db.category_events import (
-            MIN_SUB_CLUSTER_SIZE, SPLIT_RECHECK_DELTA,
-        )
         SIZE = 12  # > MIN_CATEGORY_SIZE_FOR_SPLIT (10) and > SPLIT_RECHECK_DELTA
 
         post_pp_pairs = []
@@ -3346,8 +3358,9 @@ class TestParallelStressNoDeadlocks:
         Each does a tiny embed call. None may hang; total wall-clock
         must be bounded; peak in-flight must respect the bound."""
         import threading
-        from llm import OPENAI_API_SEMAPHORE, OPENAI_CONCURRENCY
+
         from db.embeddings import OpenAIEmbedder
+        from llm import OPENAI_CONCURRENCY
 
         in_flight = [0]
         peak = [0]
@@ -3400,6 +3413,7 @@ class TestParallelStressNoDeadlocks:
         a sweep that ALSO uses parallel LLM (prefetch_llm_batch + parallel
         decide_split). No thread may hang."""
         import threading
+
         from db.embeddings import FakeEmbedder
         from promoter import run_once as promoter_run_once
 
@@ -3464,16 +3478,16 @@ class TestParallelStressNoDeadlocks:
         ThreadPoolExecutor doesn't deadlock on the merge_lock or the
         OpenAI semaphore."""
         import threading
+
         from db.embeddings import (
-            FakeEmbedder, store_painpoint_embedding, update_category_embedding,
+            FakeEmbedder,
+            store_painpoint_embedding,
+            update_category_embedding,
         )
 
         emb = FakeEmbedder()
 
         # Set up 3 split-candidate categories
-        from db.category_events import (
-            MIN_SUB_CLUSTER_SIZE, SPLIT_RECHECK_DELTA,
-        )
         SIZE = 12
 
         for i in range(SIZE * 3):
@@ -3565,6 +3579,7 @@ class TestParallelStressNoDeadlocks:
         """10 consecutive promoter.run_once calls — each spawns its own
         embed_batch HTTP. Verify no thread leak."""
         import threading
+
         from db.embeddings import FakeEmbedder
         from promoter import run_once as promoter_run_once
 
@@ -3593,6 +3608,7 @@ class TestParallelStressNoDeadlocks:
         Other promoters waiting for the lock must not deadlock during this
         single-batch bootstrap call."""
         import threading
+
         from db.embeddings import FakeEmbedder
         from promoter import run_once as promoter_run_once
 

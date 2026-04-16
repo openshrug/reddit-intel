@@ -11,7 +11,7 @@ merged table via embedding cosine similarity.
 import logging
 
 import db
-from db.posts import upsert_post, upsert_comment
+from db.posts import upsert_comment, upsert_post
 from painpoint_extraction import extract_painpoints
 from reddit_scraper import scrape_subreddit_full
 
@@ -47,8 +47,8 @@ async def analyze(subreddit, *, min_score=None):
     # promoter run to pick up.
     promoted = {"processed": 0, "linked": 0, "error": None}
     try:
-        from promoter import run_once
         from db.embeddings import OpenAIEmbedder
+        from promoter import run_once
 
         log.info("pipeline: promoting pending painpoints")
         promoted = run_once(embedder=OpenAIEmbedder())

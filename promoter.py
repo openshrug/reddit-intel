@@ -11,8 +11,8 @@ import time
 
 import db
 from db import in_clause_placeholders
-from db.painpoints import promote_pending
 from db.embeddings import OpenAIEmbedder
+from db.painpoints import promote_pending
 
 log = logging.getLogger(__name__)
 

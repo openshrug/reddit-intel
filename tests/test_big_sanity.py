@@ -21,18 +21,16 @@ import time
 import pytest
 
 import db
-from db.posts import upsert_post, upsert_comment
+from category_worker import run_sweep
+from db.embeddings import FakeEmbedder
+from db.llm_naming import FakeNamer
 from db.painpoints import (
-    add_pending_source,
     get_uncategorized_id,
     promote_pending,
     save_pending_painpoint,
 )
+from db.posts import upsert_post
 from db.relevance import per_source_relevance
-from db.embeddings import FakeEmbedder
-from db.llm_naming import FakeNamer
-from db.locks import merge_lock
-from category_worker import run_sweep
 
 
 @pytest.fixture
@@ -281,7 +279,7 @@ class TestBigSanity:
             pid = _post(f"t3_bloat_{i}", score=300, num_comments=80)
             pp_id = save_pending_painpoint(pid, title, severity=7)
             _seed_painpoint_in_cat(bloated_id, title, 7, pid, pp_id, relevance=7.0)
-        print(f"  Created bloated category: BloatedMixed (10 members, 2 sub-topics)")
+        print("  Created bloated category: BloatedMixed (10 members, 2 sub-topics)")
 
         # Merge siblings (near-identical categories)
         sib_a = _seed_category("K8s-Eviction-A", parent_id)
@@ -300,7 +298,7 @@ class TestBigSanity:
             pid = _post(f"t3_sib_b_{i}", score=200, num_comments=50)
             pp_id = save_pending_painpoint(pid, title, severity=7)
             _seed_painpoint_in_cat(sib_b, title, 7, pid, pp_id, relevance=6.0)
-        print(f"  Created merge siblings: K8s-Eviction-A (2 members) + K8s-Eviction-B (2 members)")
+        print("  Created merge siblings: K8s-Eviction-A (2 members) + K8s-Eviction-B (2 members)")
 
         # Uncategorized cluster (should form a new category)
         for i, title in enumerate([
@@ -318,7 +316,7 @@ class TestBigSanity:
                 _seed_painpoint_in_cat(uncat_id, title, 7, pid, pp_id, relevance=7.0)
             finally:
                 conn.close()
-        print(f"  Created Uncategorized cluster: 5 Redis cache painpoints")
+        print("  Created Uncategorized cluster: 5 Redis cache painpoints")
 
         # ==============================================================
         # 5. STRESS — concurrent promoters

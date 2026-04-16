@@ -17,7 +17,6 @@ can show a live feed while the pipeline runs.
 """
 
 import json
-import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -26,9 +25,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import database as db
-from llm import get_client, llm_call, execute_sql_queries, web_search, DB_SCHEMA
-from reddit_scraper import scrape_subreddit, scrape_comments
 
+from llm import DB_SCHEMA, execute_sql_queries, get_client, llm_call, web_search
+from reddit_scraper import scrape_comments, scrape_subreddit
 
 CACHE_DIR = Path(__file__).parent.parent / "demo_cache"
 CACHE_TTL_SECONDS = 24 * 60 * 60  # 24h

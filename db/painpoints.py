@@ -1,7 +1,7 @@
 import logging
 import sqlite3
 
-from . import get_db, _now, UNCATEGORIZED_NAME, in_clause_placeholders, uncategorized_id
+from . import _now, get_db, in_clause_placeholders, uncategorized_id
 from .categories import get_category_id_by_name
 from .embeddings import (
     MERGE_COSINE_THRESHOLD,

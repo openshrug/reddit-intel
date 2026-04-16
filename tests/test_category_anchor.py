@@ -23,7 +23,6 @@ from db.embeddings import (
     delete_category_anchor,
     find_best_category,
     get_category_anchor,
-    get_painpoint_embedding,
     store_category_anchor,
     store_painpoint_embedding,
     update_category_embedding,

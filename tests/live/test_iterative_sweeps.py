@@ -24,13 +24,12 @@ from dotenv import load_dotenv
 load_dotenv(override=True)
 
 import db
-
 import reddit_scraper as _rs
+
 _rs.POSTS_PER_WINDOW = 15
 _rs.POSTS_WITH_COMMENTS = 6
 
 from subreddit_pipeline import analyze
-
 
 SUBREDDITS = [
     "iOSAppsMarketing",
@@ -80,8 +79,8 @@ class TestIterativeSweeps:
         # Three successive sweeps
         # ------------------------------------------------------------------
         from category_worker import run_sweep
-        from db.llm_naming import LLMNamer
         from db.embeddings import OpenAIEmbedder
+        from db.llm_naming import LLMNamer
 
         for pass_num in (1, 2, 3):
             print("\n" + "=" * 100)

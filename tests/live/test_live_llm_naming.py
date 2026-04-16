@@ -16,11 +16,10 @@ from dotenv import load_dotenv
 load_dotenv(override=True)
 
 import db
-from db.posts import upsert_post
-from db.painpoints import save_pending_painpoint, promote_pending, get_uncategorized_id
-from db.llm_naming import LLMNamer
 from category_worker import run_sweep
-
+from db.llm_naming import LLMNamer
+from db.painpoints import get_uncategorized_id, promote_pending, save_pending_painpoint
+from db.posts import upsert_post
 
 requires_api_key = pytest.mark.skipif(
     not os.getenv("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY", "").startswith("your-"),

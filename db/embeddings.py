@@ -15,7 +15,6 @@ import hashlib
 import math
 import random
 import struct
-from typing import Optional
 
 EMBEDDING_MODEL = "text-embedding-3-small"
 EMBEDDING_DIM = 1536
@@ -69,6 +68,7 @@ class OpenAIEmbedder:
         in-flight budget as completion calls."""
         import logging
         import time
+
         from llm import OPENAI_API_SEMAPHORE
         log = logging.getLogger(__name__)
         client = self._get_client()

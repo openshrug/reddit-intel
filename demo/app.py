@@ -20,22 +20,20 @@ import time
 import uuid
 from pathlib import Path
 
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
-from fastapi.staticfiles import StaticFiles
 
 from demo.analyzer import (
-    analyze_subreddit,
-    list_cached,
     _load_cache,
-    load_cache_any,
     _normalize_name,
-    mark_ideas_pending,
+    analyze_subreddit,
     generate_ideas_for_cached,
     get_ideas_log,
+    list_cached,
+    load_cache_any,
+    mark_ideas_pending,
 )
-
 
 BASE_DIR = Path(__file__).parent
 TEMPLATES = Jinja2Templates(directory=str(BASE_DIR / "templates"))

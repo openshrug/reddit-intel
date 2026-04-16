@@ -16,8 +16,8 @@ import os
 import time
 
 import db
-from db.queries import run_sql
 import painpoint_extraction.extractor as ext
+from db.queries import run_sql
 from painpoint_extraction.eval import run_eval
 
 log = logging.getLogger(__name__)
