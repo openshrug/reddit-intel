@@ -52,3 +52,10 @@ py-modules = [
     "mcp_server",
 ]
 packages = ["db", "painpoint_extraction"]
+
+# Default test discovery skips tests/live — those tests hit real OpenAI /
+# Reddit APIs, take 15+ minutes total, cost money, and need credentials.
+# Run them explicitly with `pytest tests/live/`.
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--ignore=tests/live"

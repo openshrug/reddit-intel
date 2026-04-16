@@ -346,16 +346,15 @@ class TestLiveEndToEnd:
 
             print(f"\n  ALL PAINPOINTS ({conn.execute('SELECT COUNT(*) FROM painpoints').fetchone()[0]}):")
             pps = conn.execute(
-                "SELECT p.id, p.title, p.severity, p.signal_count, p.relevance, "
+                "SELECT p.id, p.title, p.severity, p.signal_count, "
                 "c.name AS cat FROM painpoints p "
                 "LEFT JOIN categories c ON c.id = p.category_id "
-                "ORDER BY p.relevance DESC NULLS LAST"
+                "ORDER BY p.signal_count DESC"
             ).fetchall()
-            print(f"    {'id':>4} {'rel':>8} {'sig':>4} {'sev':>4} {'category':<35} title")
-            print(f"    {'-'*4} {'-'*8} {'-'*4} {'-'*4} {'-'*35} {'-'*55}")
+            print(f"    {'id':>4} {'sig':>4} {'sev':>4} {'category':<35} title")
+            print(f"    {'-'*4} {'-'*4} {'-'*4} {'-'*35} {'-'*55}")
             for p in pps:
-                r = f"{p['relevance']:.3f}" if p['relevance'] else "NULL"
-                print(f"    {p['id']:>4} {r:>8} {p['signal_count']:>4} {p['severity']:>4} "
+                print(f"    {p['id']:>4} {p['signal_count']:>4} {p['severity']:>4} "
                       f"{(p['cat'] or 'NULL'):<35} {p['title'][:60]}")
 
             # Checks

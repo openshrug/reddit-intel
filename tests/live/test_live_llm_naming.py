@@ -218,16 +218,15 @@ class TestLiveLLMNaming:
 
             print("\n--- Painpoints and their categories ---")
             pps = conn.execute(
-                "SELECT p.id, p.title, p.severity, p.relevance, "
+                "SELECT p.id, p.title, p.severity, p.signal_count, "
                 "c.name AS category "
                 "FROM painpoints p "
                 "LEFT JOIN categories c ON c.id = p.category_id "
                 "ORDER BY c.name, p.title"
             ).fetchall()
             for p in pps:
-                rel = f"{p['relevance']:.2f}" if p['relevance'] else "NULL"
                 print(
-                    f"  [{p['id']:>3}] rel={rel:>7}  sev={p['severity']}  "
+                    f"  [{p['id']:>3}] sig={p['signal_count']:>3}  sev={p['severity']}  "
                     f"cat={p['category'] or 'NULL':<40}  "
                     f"{p['title'][:55]}"
                 )

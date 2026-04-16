@@ -3048,6 +3048,16 @@ class TestBootstrapBatchedEmbedding:
         result in exactly ONE call to embed_batch (not N to embed)."""
         from db.embeddings import bootstrap_category_embeddings, FakeEmbedder
 
+        # init_db() may have eagerly bootstrapped anchors if OPENAI_API_KEY
+        # was set. Clear them so the counting embedder sees real work.
+        conn = db.get_db()
+        try:
+            conn.execute("DELETE FROM category_anchor_vec")
+            conn.execute("DELETE FROM category_vec")
+            conn.commit()
+        finally:
+            conn.close()
+
         single_calls = []
         batch_calls = []
 
@@ -3075,8 +3085,6 @@ class TestBootstrapBatchedEmbedding:
             f"bootstrap should call embed_batch() exactly once — got "
             f"{len(batch_calls)} batch calls"
         )
-        # The seeded taxonomy has many root + child categories — make
-        # sure we batched ALL of them in one call.
         assert batch_calls[0] > 5, (
             f"batch was unexpectedly small ({batch_calls[0]}); seeded "
             f"taxonomy should have >5 categories to bootstrap"
@@ -3086,6 +3094,15 @@ class TestBootstrapBatchedEmbedding:
         """Running bootstrap twice shouldn't re-embed already-bootstrapped
         categories. The second batch call should be empty (or skipped)."""
         from db.embeddings import bootstrap_category_embeddings, FakeEmbedder
+
+        # Clear any eagerly-bootstrapped anchors so the first call does real work.
+        conn = db.get_db()
+        try:
+            conn.execute("DELETE FROM category_anchor_vec")
+            conn.execute("DELETE FROM category_vec")
+            conn.commit()
+        finally:
+            conn.close()
 
         batch_sizes = []
 
@@ -3107,7 +3124,6 @@ class TestBootstrapBatchedEmbedding:
         finally:
             conn.close()
 
-        # Second call should embed nothing
         assert batch_sizes[0] > 0
         # Either no second call (early return) or a 0-len batch
         if len(batch_sizes) > 1:
