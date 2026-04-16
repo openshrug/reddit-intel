@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "reddit-intel": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["-m", "mcp_server"],
+      "env": {
+        "REDDIT_CLIENT_ID": "${REDDIT_CLIENT_ID}",
+        "REDDIT_CLIENT_SECRET": "${REDDIT_CLIENT_SECRET}",
+        "OPENAI_API_KEY": "${OPENAI_API_KEY}"
+      }
+    }
+  }
+}
