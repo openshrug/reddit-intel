@@ -1,6 +1,0 @@
-# Scrape configuration
-
-subriff:
-  enabled: true
-  min_subscribers: 5000
-  limit: 50

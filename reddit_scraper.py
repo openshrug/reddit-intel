@@ -9,17 +9,13 @@ dedup, configurable comment budget).
 """
 
 import asyncio
-import json
 import logging
 import os
 import time
-from pathlib import Path
 
 import httpx
 
 log = logging.getLogger(__name__)
-
-CONFIG_FILE = Path(__file__).parent / "config.json"
 
 # --- Tunables ---
 # scrape_subreddit_full tunables
@@ -78,25 +74,6 @@ def _oauth_headers():
         "Authorization": f"Bearer {token}",
         "User-Agent": os.getenv("REDDIT_USER_AGENT", "RedditPulse/1.0"),
     }
-
-
-# ============================================================
-# Config helpers (sync, pure file I/O)
-# ============================================================
-
-def _load_subreddits():
-    if CONFIG_FILE.exists():
-        config = json.loads(CONFIG_FILE.read_text())
-        return [s["name"] for s in config.get("reddit", {}).get("subreddits", [])]
-    return ["programming", "technology", "SideProject", "webdev",
-            "MachineLearning", "artificial", "startups"]
-
-
-def _load_min_score():
-    if CONFIG_FILE.exists():
-        config = json.loads(CONFIG_FILE.read_text())
-        return config.get("reddit", {}).get("min_score", 50)
-    return 50
 
 
 # ============================================================
@@ -385,51 +362,6 @@ async def scrape_subreddit_full(subreddit, *, posts_per_window=POSTS_PER_WINDOW,
                  subreddit, len(targets), len(unique))
 
     return unique
-
-
-# ============================================================
-# Multi-subreddit helpers
-# ============================================================
-
-SEED_SUBS = [
-    "programming", "webdev", "devops", "ExperiencedDevs",
-    "artificial", "MachineLearning", "LocalLLaMA",
-    "ChatGPT", "ClaudeAI", "SideProject", "startups",
-    "technology", "sysadmin",
-]
-
-SEED_QUERIES = [
-    '"frustrated with" OR "I hate" OR "why is it so hard"',
-    '"switched from" OR "moved away from" OR "gave up on"',
-    '"wish there was" OR "someone should build"',
-    '"just launched" OR "just shipped" OR "I built"',
-    '"open source alternative" OR "free alternative"',
-]
-
-
-def _load_deep_subs():
-    if CONFIG_FILE.exists():
-        config = json.loads(CONFIG_FILE.read_text())
-        subs = [s["name"] for s in config.get("reddit", {}).get("subreddits", [])]
-        if subs:
-            return subs
-    return SEED_SUBS
-
-
-async def scrape_all_subreddits(subreddits=None, **kwargs):
-    """Run scrape_subreddit_full for each subreddit sequentially
-    (they share the same rate-limit budget)."""
-    subreddits = subreddits or _load_deep_subs()
-    all_results = {}
-    for sub in subreddits:
-        try:
-            posts = await scrape_subreddit_full(sub, **kwargs)
-            all_results[sub] = posts
-            log.info("r/%s: %d posts", sub, len(posts))
-        except Exception as exc:
-            log.warning("r/%s: failed (%s)", sub, exc)
-            all_results[sub] = []
-    return all_results
 
 
 # ============================================================
