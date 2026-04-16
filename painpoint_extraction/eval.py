@@ -15,9 +15,9 @@ from collections import defaultdict
 from pydantic import BaseModel, Field
 
 from db import get_db, init_db
-from db.posts import get_posts_by_ids, get_comments_for_post
-from painpoint_extraction.extractor import _format_post
+from db.posts import get_comments_for_post, get_posts_by_ids
 from llm import get_client, llm_call
+from painpoint_extraction.extractor import _format_post
 
 log = logging.getLogger(__name__)
 
@@ -290,7 +290,7 @@ def _print_report(prog_results, judge_results):
     sev_mean = statistics.mean(severities) if severities else 0
     sev_stdev = statistics.stdev(severities) if len(severities) > 1 else 0
 
-    print(f"\n  Programmatic Checks")
+    print("\n  Programmatic Checks")
     print(f"  {'-' * 40}")
     print(f"  Quote verbatim:     {quote_ok:>3}/{total} ({100*quote_ok/total:.0f}%)")
     print(f"  Quote wrong source: {quote_wrong_src:>3}/{total} ({100*quote_wrong_src/total:.0f}%)")
@@ -301,7 +301,7 @@ def _print_report(prog_results, judge_results):
     for s in severities:
         sev_dist[s] = sev_dist.get(s, 0) + 1
     print(f"  Severity mean/std:  {sev_mean:.1f} / {sev_stdev:.1f}")
-    print(f"  Severity dist:      ", end="")
+    print("  Severity dist:      ", end="")
     print("  ".join(f"{i}:{sev_dist[i]}" for i in range(1, 11)))
 
     flagged = [
@@ -325,7 +325,6 @@ def _print_report(prog_results, judge_results):
     if judge_results:
         verdicts = judge_results["verdicts"]
         missed = judge_results["missed"]
-        n_judged = judge_results["painpoints_judged"]
         n_posts = judge_results["posts_judged"]
 
         print(f"\n  LLM Judge ({len(verdicts)} scored, {n_posts} posts)")

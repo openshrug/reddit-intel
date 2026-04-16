@@ -6,7 +6,25 @@ build-backend = "setuptools.build_meta"
 name = "reddit-intel"
 version = "0.2.0"
 description = "Scrape Reddit, extract painpoints via LLM, build a self-maintaining category taxonomy."
+readme = "README.md"
 requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [
+    { name = "Viktar Dubovik" },
+    { name = "Daniil Yurshevich" },
+    { name = "Daniil Zabauski" },
+]
+keywords = ["ai", "llm", "mcp", "reddit", "insight", "claude", "openai", "openclaw"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Internet",
+]
 dependencies = [
     "httpx>=0.28.0",
     "openai>=1.66.0",
@@ -30,7 +48,17 @@ mcp = [
 test = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.24.0",
+    "ruff>=0.6.0",
 ]
+
+[project.urls]
+Homepage   = "https://github.com/openshrug/reddit-intel"
+Repository = "https://github.com/openshrug/reddit-intel"
+Issues     = "https://github.com/openshrug/reddit-intel/issues"
+
+[project.scripts]
+reddit-intel     = "main:main"
+reddit-intel-mcp = "mcp_server:run"
 
 # Flat-layout packaging: engine's modules live at repo root rather than
 # inside a single top-level package dir. Explicit py-modules + packages
@@ -43,6 +71,7 @@ test = [
 # be needed — add that when non-editable installs become a real use case.
 [tool.setuptools]
 py-modules = [
+    "main",
     "reddit_scraper",
     "subreddit_pipeline",
     "promoter",
@@ -53,9 +82,36 @@ py-modules = [
 ]
 packages = ["db", "painpoint_extraction"]
 
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = ["scrape_dumps", "demo_cache", ".venv", "docs/_internal"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]
+
+# Per-file ignores for legitimate patterns ruff over-flags:
+# - tests/ files set up sys.path / load .env before importing app modules
+#   (E402), bind locals as in-test documentation (F841), and use compact
+#   one-liners in setup blocks (E702).
+# - db/category_events.py and llm.py interleave a logger init between
+#   imports as a deliberate stylistic choice; not worth churning.
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["E402", "F841", "E702"]
+"db/category_events.py" = ["E402"]
+"llm.py" = ["E402"]
+
 # Default test discovery skips tests/live — those tests hit real OpenAI /
 # Reddit APIs, take 15+ minutes total, cost money, and need credentials.
-# Run them explicitly with `pytest tests/live/`.
+# Run them with `pytest -m live` (or `pytest tests/live/` for ad-hoc runs).
+# The `live` marker is auto-applied to everything under tests/live/ via
+# tests/live/conftest.py; no per-file decorator is needed.
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "--ignore=tests/live"
+pythonpath = ["."]
+addopts = "-m 'not live'"
+markers = [
+    "live: requires REDDIT/OPENAI credentials and hits real APIs (skipped by default)",
+    "slow: takes >10s",
+]

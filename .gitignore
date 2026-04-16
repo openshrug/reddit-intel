@@ -1,16 +1,25 @@
-.env
+# Python
 __pycache__/
 *.pyc
 *.egg-info/
-venv/
 .venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+
+# Env & secrets
+.env
+
+# Local SQLite DB
 trends.db
-trends.db.lsh.pkl
-report.md
 trends.db-shm
 trends.db-wal
+trends.db.lsh.pkl
+
+# Local artifacts
+scrape_dumps/
+demo_cache/
+docs/_internal/
+report.md
 out.txt
 idea.txt
-demo_cache/
-LEGITIMACY_SCORING_PLAN.md
-scrape_dumps/

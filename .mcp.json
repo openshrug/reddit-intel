@@ -2,8 +2,7 @@
   "mcpServers": {
     "reddit-intel": {
       "type": "stdio",
-      "command": "python",
-      "args": ["-m", "mcp_server"],
+      "command": "reddit-intel-mcp",
       "env": {
         "REDDIT_CLIENT_ID": "${REDDIT_CLIENT_ID}",
         "REDDIT_CLIENT_SECRET": "${REDDIT_CLIENT_SECRET}",

@@ -1,5 +1,5 @@
 """Category worker event types, proposers, and acceptance tests
-(§5 of docs/PAINPOINT_INGEST_PLAN.md).
+(§5 of docs/_internal/PAINPOINT_INGEST_PLAN.md).
 
 The worker runs four passes per sweep, each calling one of the
 `propose_*_events` generators below. Each yielded event is then run
@@ -20,13 +20,12 @@ log = logging.getLogger(__name__)
 
 from datetime import datetime, timedelta, timezone
 
-from . import _now
+from . import UNCATEGORIZED_NAME, _now, in_clause_placeholders, uncategorized_id
 from .category_clustering import (
-    cluster_painpoints,
     category_member_titles,
+    cluster_painpoints,
     inter_category_similarity,
 )
-from . import UNCATEGORIZED_NAME, in_clause_placeholders, uncategorized_id
 from .embeddings import (
     MERGE_COSINE_THRESHOLD,
     add_member_to_centroid,

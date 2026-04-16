@@ -1,5 +1,5 @@
 """Global merge lock for the painpoint ingest pipeline (§4 of
-docs/PAINPOINT_INGEST_PLAN.md).
+docs/_internal/PAINPOINT_INGEST_PLAN.md).
 
 The promoter (db.painpoints.promote_pending) and the category worker
 (category_worker.run_sweep) are separate OS processes. A Python

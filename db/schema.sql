@@ -95,7 +95,7 @@ CREATE TABLE IF NOT EXISTS painpoint_sources (
 
 -- ============================================================================
 -- Painpoint ingest pipeline — idempotent CREATEs only
--- (see docs/PAINPOINT_INGEST_PLAN.md). ALTER TABLE additions for
+-- (see docs/_internal/PAINPOINT_INGEST_PLAN.md). ALTER TABLE additions for
 -- existing tables live in db/__init__.py:_apply_migrations() because
 -- SQLite has no ALTER TABLE ... ADD COLUMN IF NOT EXISTS.
 -- ============================================================================

@@ -5,8 +5,9 @@ Exposes the reddit-intel database (painpoints, categories, posts, comments)
 and scraping capabilities as MCP tools + resources for any MCP-compatible
 agent (OpenClaw, Claude Code, Cursor, etc.).
 
-    python mcp_server.py          # stdio transport (default)
-    python -m mcp_server          # same, works from any cwd after pip install -e .[mcp]
+    reddit-intel-mcp              # installed console script (preferred)
+    python mcp_server.py          # equivalent direct invocation
+    python -m mcp_server          # equivalent module invocation
 """
 
 import asyncio
@@ -19,12 +20,12 @@ from dotenv import load_dotenv
 from fastmcp import FastMCP
 
 import db
-from db import queries
-from db.categories import get_category_list_flat
-from db.posts import get_posts_by_ids, get_comments_for_post
 import reddit_scraper
 import subreddit_pipeline
 import subriff_scraper
+from db import queries
+from db.categories import get_category_list_flat
+from db.posts import get_comments_for_post, get_posts_by_ids
 
 load_dotenv()
 
@@ -33,13 +34,12 @@ log = logging.getLogger(__name__)
 mcp = FastMCP(
     "reddit-intel",
     instructions=(
-        "Reddit intelligence database. Default flow: (1) read the "
-        "reddit-intel://stats and reddit-intel://taxonomy resources to "
-        "ground yourself, (2) use get_top_painpoints / get_painpoint / "
-        "get_painpoint_evidence to browse, (3) call scrape_subreddit "
-        "ONLY when fresh data is needed (slow, costs API quota). Use "
-        "run_sql ONLY when no typed tool fits — read the schema "
-        "resource first."
+        "Reddit painpoint intelligence DB.\n"
+        "Default flow:\n"
+        "  1. Read reddit-intel://stats + reddit-intel://taxonomy to ground yourself.\n"
+        "  2. Browse with get_top_painpoints / get_painpoint / get_painpoint_evidence.\n"
+        "  3. Call scrape_subreddit ONLY for fresh data (slow, costs API quota).\n"
+        "Escape hatch: run_sql for ad-hoc SELECTs — read reddit-intel://schema first."
     ),
 )
 
@@ -262,7 +262,13 @@ def _check_credentials():
         )
 
 
-if __name__ == "__main__":
+def run():
+    """Entry point for the `reddit-intel-mcp` console script.
+
+    Initializes logging + DB, warns on missing creds, then starts the MCP
+    server on stdio transport. Safe to call from any cwd after
+    `pip install -e .[mcp]`.
+    """
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
@@ -271,3 +277,7 @@ if __name__ == "__main__":
     db.init_db()
     _check_credentials()
     mcp.run()
+
+
+if __name__ == "__main__":
+    run()

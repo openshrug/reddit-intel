@@ -1,45 +1,61 @@
 # reddit-intel
 
-Scrape Reddit, extract user painpoints via LLM, and build a self-maintaining
-category taxonomy -- all stored in a local SQLite database.
+> **Your future users are already on Reddit.** `reddit-intel` reads
+> thousands of their posts and surfaces the painpoints buried in the
+> noise — into a local SQLite database any AI agent can query.
+>
+> **Stop guessing. Start listening.**
 
-See [PIPELINE.md](PIPELINE.md) for architecture, data flow, and stage details.
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![CI](https://github.com/openshrug/reddit-intel/actions/workflows/ci.yml/badge.svg)](https://github.com/openshrug/reddit-intel/actions/workflows/ci.yml)
+
+## What is reddit-intel?
+
+`reddit-intel` is the engine behind that hook — a local-first pipeline
+that ingests Reddit posts and comments, asks an LLM to surface concrete
+user painpoints, deduplicates them via embeddings, and organises them
+into a category tree that mutates itself as new themes appear. The
+output lives in a single SQLite file you can query directly, browse via
+the included demo UI, or expose to any AI agent through the bundled MCP
+server. The painpoint table is raw material founders feed into product
+ideation, content research, and competitive analysis.
+
+## Why
+
+- **Local-first.** One SQLite file (`trends.db`) holds everything: raw
+  posts, comments, painpoints, categories, and `sqlite-vec` embeddings.
+  No external services beyond Reddit + OpenAI API calls.
+- **Self-maintaining taxonomy.** A category worker proposes splits,
+  merges, renames, and reparents based on embedding centroids — so the
+  taxonomy stays useful as the painpoint set grows.
+- **MCP-first.** Any MCP-compatible agent (Claude Code, Cursor,
+  OpenClaw, etc.) can query the DB and trigger scrapes via the bundled
+  `reddit-intel-mcp` server.
+- **Idempotent.** Re-running the pipeline on a subreddit skips
+  already-extracted posts; safe to schedule.
 
 ## Quick start
 
 ```bash
-# Clone and install (Python 3.11+)
+git clone https://github.com/openshrug/reddit-intel.git
+cd reddit-intel
 pip install -e .
 
-# Set credentials in .env
-cp .env.example .env   # then fill in values (see below)
+cp .env.example .env   # fill in REDDIT_CLIENT_ID/SECRET + OPENAI_API_KEY
 
-# Run the pipeline for one subreddit
-python main.py ExperiencedDevs
+reddit-intel ExperiencedDevs
 ```
 
-## Credentials
+That's it — the pipeline scrapes the subreddit, extracts painpoints with
+GPT, promotes them into the canonical table, and updates the taxonomy.
+Output lands in `trends.db` next to the project.
 
-Create a `.env` file at the project root:
+## MCP server
 
-```
-REDDIT_CLIENT_ID=...
-REDDIT_CLIENT_SECRET=...
-OPENAI_API_KEY=...
-```
-
-**Reddit:** Create a "script" app at <https://www.reddit.com/prefs/apps>.
-The client ID is shown under the app name; the secret is labeled "secret".
-Set any redirect URI (e.g. `http://localhost:8080`).
-
-**OpenAI:** Get an API key at <https://platform.openai.com/api-keys>.
-Required for painpoint extraction and embedding-based merging.
-
-## MCP Server (for AI agents)
-
-reddit-intel ships an MCP (Model Context Protocol) server that lets any
-MCP-compatible agent -- OpenClaw, Claude Code, Cursor, and others -- query
-the painpoint database and drive the scraping pipeline.
+`reddit-intel` ships an MCP (Model Context Protocol) server that lets any
+MCP-compatible agent query the painpoint database and drive the scraping
+pipeline.
 
 ### Install
 
@@ -47,22 +63,38 @@ the painpoint database and drive the scraping pipeline.
 pip install -e ".[mcp]"
 ```
 
+This installs a `reddit-intel-mcp` console command on your `PATH`.
+
 ### Run standalone
 
 ```bash
-python mcp_server.py
+reddit-intel-mcp
 ```
 
 ### Connect from Claude Code
 
-The repo includes a `.mcp.json` that configures the server automatically.
-Make sure the env vars are set in your shell or `.env` file, then open the
-project in Claude Code -- it will pick up the server config.
+The repo includes a [`.mcp.json`](.mcp.json) that wires the server up
+automatically. Make sure the env vars are set in your shell or `.env`,
+then open the project in Claude Code.
 
 To add it manually:
 
 ```bash
-claude mcp add --transport stdio reddit-intel -- python -m mcp_server
+claude mcp add --transport stdio reddit-intel -- reddit-intel-mcp
+```
+
+### Connect from Cursor
+
+Add to `.cursor/mcp.json` (or your global Cursor MCP settings):
+
+```json
+{
+  "mcpServers": {
+    "reddit-intel": {
+      "command": "reddit-intel-mcp"
+    }
+  }
+}
 ```
 
 ### Connect from OpenClaw
@@ -75,54 +107,80 @@ Add to `~/.config/openclaw/openclaw.json5`:
     servers: {
       "reddit-intel": {
         transport: "stdio",
-        command: "python",
-        args: ["-m", "mcp_server"],
+        command: "reddit-intel-mcp",
         env: {
           REDDIT_CLIENT_ID: "${REDDIT_CLIENT_ID}",
           REDDIT_CLIENT_SECRET: "${REDDIT_CLIENT_SECRET}",
-          OPENAI_API_KEY: "${OPENAI_API_KEY}"
-        }
-      }
-    }
-  }
-}
-```
-
-### Connect from Cursor
-
-Add to your Cursor MCP settings (`.cursor/mcp.json` or global config):
-
-```json
-{
-  "mcpServers": {
-    "reddit-intel": {
-      "command": "python",
-      "args": ["-m", "mcp_server"]
-    }
-  }
+          OPENAI_API_KEY: "${OPENAI_API_KEY}",
+        },
+      },
+    },
+  },
 }
 ```
 
 ### Available tools
 
-| Tool | Type | Description |
-|------|------|-------------|
-| `get_stats` | read | Global DB counts |
-| `list_categories` | read | Full taxonomy |
-| `get_top_painpoints` | read | Painpoints ranked by signal count, filterable by category/subreddit |
-| `get_painpoint` | read | Single painpoint by ID |
-| `get_painpoint_evidence` | read | Reddit posts/comments backing a painpoint |
-| `get_subreddit_summary` | read | Aggregate stats for a subreddit |
-| `get_post` | read | Full post with comments |
-| `run_sql` | read | Arbitrary SELECT queries (escape hatch) |
-| `scrape_subreddit` | write | Full scrape+extract+promote pipeline |
-| `search_reddit` | write | Search Reddit (no DB persistence) |
-| `find_trending_subreddits` | write | Discover growing subreddits via Subriff |
+| Tool                       | Type  | Description                                                                |
+| -------------------------- | ----- | -------------------------------------------------------------------------- |
+| `get_stats`                | read  | Global DB counts                                                           |
+| `list_categories`          | read  | Full taxonomy                                                              |
+| `get_top_painpoints`       | read  | Painpoints ranked by signal count, filterable by category/subreddit        |
+| `get_painpoint`            | read  | Single painpoint by ID                                                     |
+| `get_painpoint_evidence`   | read  | Reddit posts/comments backing a painpoint                                  |
+| `get_subreddit_summary`    | read  | Aggregate stats for a subreddit                                            |
+| `get_post`                 | read  | Full post with comments                                                    |
+| `run_sql`                  | read  | Arbitrary `SELECT` queries (escape hatch — `SELECT` only, no writes)       |
+| `scrape_subreddit`         | write | Full scrape + extract + promote pipeline (slow, costs API quota)           |
+| `search_reddit`            | write | Search Reddit (no DB persistence)                                          |
+| `find_trending_subreddits` | write | Discover growing subreddits via Subriff                                    |
 
 ### Available resources
 
-| URI | Description |
-|-----|-------------|
-| `reddit-intel://schema` | Database schema (for composing `run_sql` queries) |
-| `reddit-intel://stats` | DB stats snapshot |
-| `reddit-intel://taxonomy` | Category taxonomy |
+| URI                        | Description                                                |
+| -------------------------- | ---------------------------------------------------------- |
+| `reddit-intel://schema`    | Database schema (for composing `run_sql` queries)          |
+| `reddit-intel://stats`     | DB stats snapshot                                          |
+| `reddit-intel://taxonomy`  | Category taxonomy                                          |
+
+## Credentials
+
+Create a `.env` file at the project root:
+
+```dotenv
+REDDIT_CLIENT_ID=...
+REDDIT_CLIENT_SECRET=...
+REDDIT_USER_AGENT=reddit-intel/0.2 by your-reddit-username
+OPENAI_API_KEY=...
+```
+
+**Reddit:** Create a "script" app at <https://www.reddit.com/prefs/apps>.
+The client ID is shown under the app name; the secret is labeled "secret".
+Set any redirect URI (e.g. `http://localhost:8080`).
+
+**OpenAI:** Get an API key at <https://platform.openai.com/api-keys>.
+Required for painpoint extraction and embedding-based merging.
+
+## Development
+
+```bash
+pip install -e ".[test,mcp]"
+
+pytest               # offline tests only (default)
+pytest -m live       # live tests — hit Reddit + OpenAI, need credentials
+ruff check .         # lint
+```
+
+Live tests live under [`tests/live/`](tests/live/) and are skipped by
+default via `addopts = "-m 'not live'"` in `pyproject.toml`.
+
+## Further reading
+
+- [PIPELINE.md](PIPELINE.md) — architecture, data flow, stage-by-stage walkthrough.
+- [ROADMAP.md](ROADMAP.md) — what's coming next.
+- [AGENTS.md](AGENTS.md) — orientation for AI agents working in this repo.
+- [SECURITY.md](SECURITY.md) — vulnerability reporting + tool-safety notes.
+
+## License
+
+[MIT](LICENSE) © Viktar Dubovik, Daniil Yurshevich, Daniil Zabauski
