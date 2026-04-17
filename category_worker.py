@@ -3,8 +3,9 @@
 Runs as a separate OS process from the promoter. Acquires the merge lock
 once per sweep, runs five passes (Uncategorized -> split -> delete ->
 merge -> reroute), each emitting events through the per-event acceptance
-test in db/category_events.py. Idempotent: running twice in a row
-produces no new *accepted* events on the second run.
+test in db/category_events.py. Converges in 2-3 sweeps: the first sweep
+moves Uncategorized painpoints via reroute, which shifts centroids and
+may surface additional reroutes on subsequent sweeps until a fixpoint.
 """
 
 import logging

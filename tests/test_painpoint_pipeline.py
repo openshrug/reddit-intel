@@ -1513,12 +1513,22 @@ class TestRealisticWorkflow:
         finally:
             conn.close()
 
-        summary2 = run_sweep(namer=namer, embedder=embedder)
-        for step_name, step in summary2.items():
-            assert step["accepted"] == 0, (
-                f"second sweep should be idempotent, but {step_name} accepted "
-                f"{step['accepted']}"
-            )
+        # Convergence: now that reroute includes Uncategorized, the first
+        # sweep can move Uncat painpoints into categories, shifting those
+        # centroids, which may surface more reroutes on the next sweep.
+        # We assert convergence (a sweep accepts 0 events) within a few
+        # passes, not strict 1-shot idempotency.
+        MAX_CONVERGENCE_SWEEPS = 5
+        converged_at = None
+        for i in range(2, 2 + MAX_CONVERGENCE_SWEEPS):
+            s = run_sweep(namer=namer, embedder=embedder)
+            if sum(step["accepted"] for step in s.values()) == 0:
+                converged_at = i
+                break
+        assert converged_at is not None, (
+            f"sweep did not converge in {MAX_CONVERGENCE_SWEEPS} passes; "
+            f"last summary: {s}"
+        )
 
         conn = db.get_db()
         try:

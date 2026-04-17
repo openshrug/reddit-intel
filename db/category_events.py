@@ -53,6 +53,14 @@ _LLM_PARALLEL_WORKERS = 5
 # category over noise.
 SPLIT_RECHECK_DELTA = 10
 MERGE_CATEGORY_THRESHOLD = 0.80
+# Root-level pairs get a looser threshold: LLM-review fans out per
+# painpoint and can't coordinate, so it spawns semantically-overlapping
+# roots (e.g. 11 parallel "Dating X" roots in one sweep) whose anchor
+# descriptions diverge enough to sit in the 0.70-0.78 band — real
+# duplicates but just below 0.80. Child-under-parent pairs keep the
+# stricter 0.80 because those are already scoped to one parent's topic
+# and an 0.70 match there would over-merge genuine siblings.
+MERGE_ROOT_CATEGORY_THRESHOLD = 0.70
 # A category with no member added/updated in this many days is stale —
 # propose delete. Replaces the old mass-based threshold (which was a size
 # test dressed up as a quality test).
@@ -62,7 +70,12 @@ CATEGORY_STALE_DAYS = 30
 # when the alternative's cosine sim exceeds the current sim by at least
 # REROUTE_MARGIN. Conservative so we don't thrash near-ties. Fixes
 # residual singleton hijacking that the split step can't cluster.
-REROUTE_MARGIN = 0.08
+# Raised from 0.08 → 0.10 after Phase-1 (reroute-includes-Uncat):
+# with the full corpus now eligible for reroute, the old margin fired
+# ~47 near-tie ping-pongs even at sweep 5 without Uncat pressure.
+# 0.10 kills the tail while still letting genuine mis-routings move
+# (real-world margins seen in logs: 0.15-0.55).
+REROUTE_MARGIN = 0.10
 
 
 # ---------------------------------------------------------------------------
@@ -101,15 +114,18 @@ def _uncategorized_id(conn):
         return None
 
 
-# How many Uncategorized singletons the LLM reviews per sweep. Bounds
-# cost (one gpt-4.1-mini call per reviewed painpoint) while still
-# making meaningful progress on the queue. Prioritised by
-# signal_count × severity so we look at the loudest painpoints first.
-# Raised from 20 → 50 after the relaxed extraction prompt pushed
-# Uncategorized past 160 painpoints — at 20 we only touch the very top;
-# 50 lets the LLM bootstrap new non-tech roots (dating, fitness,
-# lifestyle) faster. Cost: ~$0.05 per sweep at gpt-4.1-mini rates.
-MAX_UNCAT_LLM_REVIEWS = 50
+# How many Uncategorized singletons the LLM reviews per sweep.
+# None = unbounded (review every singleton). Capped int still works for
+# tests that want to bound fan-out (see test_max_reviews_bounds_llm_calls).
+# Removed the 50-cap after observing that multi-sweep runs plateau at
+# ~43% Uncategorized: each sweep the LLM is handed the top-50 by
+# signal×severity, approves only 3-8, and the remaining unreviewed tail
+# never gets attention. At ~150 pendings × gpt-4.1-mini this costs
+# ~$0.06 per sweep — bounded by the data volume itself, not a magic
+# number. Reroute-includes-Uncat (see propose_reroute_events) removes
+# most of the pressure anyway: many former singletons are now pulled
+# into existing categories before the LLM sees them.
+MAX_UNCAT_LLM_REVIEWS = None
 
 
 def propose_uncategorized_events(conn, embedder=None):
@@ -213,7 +229,7 @@ def propose_uncategorized_singleton_events(
     def _priority(m):
         return (m["signal_count"] or 1) * (m["severity"] or 5)
     singletons.sort(key=_priority, reverse=True)
-    batch = singletons[:max_reviews]
+    batch = singletons if max_reviews is None else singletons[:max_reviews]
 
     _roots, flat = _get_taxonomy_for_llm(conn)
 
@@ -474,27 +490,57 @@ def _category_last_activity(conn, category_id):
 
 
 def propose_delete_events(conn, now=None):
-    """Step 3: propose `delete_category` for any non-Uncategorized category
-    whose most recently updated member is older than CATEGORY_STALE_DAYS.
+    """Step 3: propose `delete_category` for non-Uncategorized categories
+    that are either (a) drained empty by reroute, or (b) stale past
+    CATEGORY_STALE_DAYS.
 
-    "Stale" replaces the old mass-based threshold, which was a size test
-    dressed up as a quality test (tiny-but-valid categories were getting
-    culled). Staleness tracks membership activity directly.
+    The empty-but-drained path catches ghost categories that reroute
+    emptied mid-sweep — without it, a category with zero members sticks
+    around for 30 days cluttering the tree (observed 50 such ghosts
+    after 3 sweeps). The staleness path still handles populated-but-idle
+    categories.
 
-    Unborn categories (no members yet) are left alone — they're unused,
-    not dead.
+    Unborn categories (0 members, never had any) are left alone — they
+    might be seed shelves awaiting population. We tell "unborn" from
+    "drained" by `member_set_last_changed_at`: set once, drained → delete;
+    still NULL → unborn, keep.
     """
     now = now or datetime.now(timezone.utc)
     cutoff = now - timedelta(days=CATEGORY_STALE_DAYS)
 
     rows = conn.execute(
-        "SELECT id, name, parent_id FROM categories WHERE name != ?",
+        "SELECT id, name, parent_id, member_set_last_changed_at "
+        "FROM categories WHERE name != ?",
         (UNCATEGORIZED_NAME,),
     ).fetchall()
     for cat in rows:
+        member_count = conn.execute(
+            "SELECT COUNT(*) FROM painpoints WHERE category_id = ?", (cat["id"],)
+        ).fetchone()[0]
+
+        # Drained-empty path: 0 members AND once had members (a real
+        # delete, not an unborn seed shelf).
+        if member_count == 0:
+            if cat["member_set_last_changed_at"] is None:
+                continue   # unborn seed shelf
+            yield CategoryEvent(
+                event_type="delete_category",
+                payload={
+                    "category_id": cat["id"],
+                    "category_name": cat["name"],
+                    "parent_id": cat["parent_id"],
+                },
+                target_category=cat["id"],
+                metric_name="member_count",
+                metric_value=0.0,
+                threshold=0.0,
+            )
+            continue
+
+        # Staleness path: populated but idle.
         last_activity = _category_last_activity(conn, cat["id"])
         if last_activity is None:
-            continue   # unborn
+            continue   # unborn (shouldn't hit given member_count > 0, but safe)
         if last_activity >= cutoff:
             continue   # fresh
         age_days = (now - last_activity).total_seconds() / 86400.0
@@ -518,25 +564,41 @@ def propose_delete_events(conn, now=None):
 
 
 def propose_merge_events(conn, embedder=None):
-    """Step 4: for each pair of sibling categories under the same parent,
-    compute inter-category embedding similarity. If above
-    MERGE_CATEGORY_THRESHOLD, propose merge_categories.
+    """Step 4: for each pair of categories sharing a parent (including
+    root-level pairs where parent is NULL), compute inter-category
+    embedding similarity. Above MERGE_CATEGORY_THRESHOLD → merge.
+
+    Previously only non-NULL parents were compared, so the LLM review
+    could spawn 11 parallel "Dating X" roots and none would ever merge
+    (each call sees the taxonomy independently and can't coordinate).
+    Allowing NULL-parent pairs lets the merge step collapse that sprawl.
     """
-    parents = conn.execute(
-        "SELECT DISTINCT parent_id FROM categories WHERE parent_id IS NOT NULL"
-    ).fetchall()
-    for p in parents:
-        siblings = conn.execute(
-            "SELECT id, name FROM categories WHERE parent_id = ? AND name != ? "
-            "ORDER BY id",
-            (p["parent_id"], UNCATEGORIZED_NAME),
+    parent_ids = [
+        r["parent_id"] for r in conn.execute(
+            "SELECT DISTINCT parent_id FROM categories"
         ).fetchall()
+    ]
+    for parent_id in parent_ids:
+        if parent_id is None:
+            siblings = conn.execute(
+                "SELECT id, name FROM categories "
+                "WHERE parent_id IS NULL AND name != ? ORDER BY id",
+                (UNCATEGORIZED_NAME,),
+            ).fetchall()
+            threshold = MERGE_ROOT_CATEGORY_THRESHOLD
+        else:
+            siblings = conn.execute(
+                "SELECT id, name FROM categories "
+                "WHERE parent_id = ? AND name != ? ORDER BY id",
+                (parent_id, UNCATEGORIZED_NAME),
+            ).fetchall()
+            threshold = MERGE_CATEGORY_THRESHOLD
         ids = [s["id"] for s in siblings]
         for i in range(len(ids)):
             for j in range(i + 1, len(ids)):
                 a, b = ids[i], ids[j]
                 sim = inter_category_similarity(conn, a, b, embedder=embedder)
-                if sim < MERGE_CATEGORY_THRESHOLD:
+                if sim < threshold:
                     continue
                 yield CategoryEvent(
                     event_type="merge_categories",
@@ -547,7 +609,7 @@ def propose_merge_events(conn, embedder=None):
                     target_category=a,
                     metric_name="merge_text_sim",
                     metric_value=sim,
-                    threshold=MERGE_CATEGORY_THRESHOLD,
+                    threshold=threshold,
                 )
 
 
@@ -570,13 +632,30 @@ def _test_add_category_split(conn, event):
 
 
 def _test_delete_category(conn, event):
-    """Re-check staleness under the lock: a member added between propose
-    and apply keeps the category alive.
+    """Re-check under the lock so a member added between propose and
+    apply keeps the category alive. Two acceptance paths:
+
+    - member_count event: must still be 0 members. Something routed in
+      after propose → reject so we don't delete a populated category.
+    - category_age_days event: must still be stale (no activity since
+      cutoff). A fresh member bump since propose → reject.
     """
     cat_id = event.payload["category_id"]
+    member_count = conn.execute(
+        "SELECT COUNT(*) FROM painpoints WHERE category_id = ?", (cat_id,)
+    ).fetchone()[0]
+
+    if event.metric_name == "member_count":
+        if member_count > 0:
+            return False, f"cascade: {member_count} members arrived after propose"
+        return True, "still empty"
+
+    # staleness path
+    if member_count == 0:
+        return True, "no members"
     last_activity = _category_last_activity(conn, cat_id)
     if last_activity is None:
-        return True, "no members"
+        return True, "no activity stamp"
     cutoff = datetime.now(timezone.utc) - timedelta(days=CATEGORY_STALE_DAYS)
     if last_activity >= cutoff:
         return False, f"member activity at {last_activity.isoformat()} is fresh"
@@ -613,8 +692,13 @@ def propose_reroute_events(conn, embedder=None):
     current_sim and blocking every reroute. Singleton categories (1
     member) have no leave-one-out centroid → current_sim = 0.
 
-    Skips painpoints in Uncategorized (step 1 handles those) and never
-    reroutes TO Uncategorized.
+    Scans EVERY categorised painpoint including Uncategorized. Uncat
+    painpoints have no coherent centroid (Uncategorized is the "no home"
+    bucket, not a topic), so their current_sim is forced to 0 and any
+    category that matches above REROUTE_MARGIN wins. Previously Uncat
+    painpoints were excluded, which left ~40% of painpoints structurally
+    unreachable by reroute even when an existing sub-category was a
+    cos 0.45+ match. Never reroutes TO Uncategorized.
     """
     uncat_id = _uncategorized_id(conn)
     now = _now()
@@ -633,9 +717,7 @@ def propose_reroute_events(conn, embedder=None):
         FROM painpoints p
         JOIN painpoint_vec v ON v.rowid = p.id
         WHERE p.category_id IS NOT NULL
-          AND p.category_id != COALESCE(?, -1)
         """,
-        (uncat_id,),
     ).fetchall()
 
     for cat_row in cat_rows:
@@ -664,8 +746,14 @@ def propose_reroute_events(conn, embedder=None):
             ):
                 continue
 
-            loo_sim = leave_one_out_centroid_sim(members, pp_id, emb)
-            current_sim = 0.0 if loo_sim is None else loo_sim
+            if current_cat == uncat_id:
+                # Uncategorized has no coherent centroid — it's the
+                # "no home" bucket, not a topic. Force current_sim = 0
+                # so any category above REROUTE_MARGIN wins.
+                current_sim = 0.0
+            else:
+                loo_sim = leave_one_out_centroid_sim(members, pp_id, emb)
+                current_sim = 0.0 if loo_sim is None else loo_sim
 
             ranked = find_best_category_ranked(conn, emb, limit=50)
             best_other_id = None
@@ -1145,10 +1233,16 @@ def _apply_merge_categories(conn, event, namer, embedder=None):
         ).fetchall()
     ]
 
-    # Repoint painpoints and delete the loser
+    # Repoint painpoints from loser → survivor, and any children of the
+    # loser (for root merges, the loser may own sub-categories) become
+    # children of the survivor so the subtree isn't orphaned.
     conn.execute(
         "UPDATE painpoints SET category_id = ?, last_updated = ? WHERE category_id = ?",
         (survivor_id, _now(), loser_id),
+    )
+    conn.execute(
+        "UPDATE categories SET parent_id = ? WHERE parent_id = ?",
+        (survivor_id, loser_id),
     )
     _drop_category_vec_state(conn, loser_id)
     conn.execute("DELETE FROM categories WHERE id = ?", (loser_id,))

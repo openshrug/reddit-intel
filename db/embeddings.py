@@ -58,7 +58,10 @@ class OpenAIEmbedder:
     def _get_client(self):
         if self._client is None:
             import openai
-            self._client = openai.OpenAI()
+            # 60s per-request timeout — same reasoning as llm.get_client:
+            # SDK default is 10min, which stalls parallel fan-outs when a
+            # single call sticks. Embedding calls are typically <2s.
+            self._client = openai.OpenAI(timeout=60.0)
         return self._client
 
     def _embed_with_retry(self, inputs, retries=2, backoff_base=4):

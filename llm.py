@@ -205,7 +205,12 @@ def get_client():
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY not set in .env")
-    return OpenAI(api_key=api_key)
+    # 60s per-request timeout: the SDK default (10min) let a single
+    # stuck session hang `parallel_namer_calls` for up to 10min × retries,
+    # because that helper walks futures FIFO with no deadline. 60s is
+    # well above the p99 observed latency (~5-15s) and combined with the
+    # SDK's automatic retry, transient slowness still recovers.
+    return OpenAI(api_key=api_key, timeout=60.0)
 
 
 def execute_sql_queries(sql_queries, max_queries=5, max_rows=20):
