@@ -1223,12 +1223,15 @@ class TestStressNoDeadlocks:
 
             mismatches = conn.execute(
                 """
-                SELECT p.id, p.signal_count, COUNT(ps.pending_painpoint_id) AS actual
+                SELECT p.id, p.signal_count,
+                       COUNT(pas.pending_painpoint_id) AS actual
                 FROM painpoints p
                 LEFT JOIN painpoint_sources ps ON ps.painpoint_id = p.id
+                LEFT JOIN pending_painpoint_all_sources pas
+                    ON pas.pending_painpoint_id = ps.pending_painpoint_id
                 GROUP BY p.id
                 HAVING p.signal_count != actual
-                """
+"""
             ).fetchall()
             assert mismatches == [], (
                 f"signal_count mismatches: {[dict(r) for r in mismatches]}"
@@ -1308,12 +1311,15 @@ class TestStressNoDeadlocks:
 
             mismatches = conn.execute(
                 """
-                SELECT p.id, p.signal_count, COUNT(ps.pending_painpoint_id) AS actual
+                SELECT p.id, p.signal_count,
+                       COUNT(pas.pending_painpoint_id) AS actual
                 FROM painpoints p
                 LEFT JOIN painpoint_sources ps ON ps.painpoint_id = p.id
+                LEFT JOIN pending_painpoint_all_sources pas
+                    ON pas.pending_painpoint_id = ps.pending_painpoint_id
                 GROUP BY p.id
                 HAVING p.signal_count != actual
-                """
+"""
             ).fetchall()
             assert mismatches == []
         finally:
@@ -1468,12 +1474,15 @@ class TestRealisticWorkflow:
 
             mismatches = conn.execute(
                 """
-                SELECT p.id, p.signal_count, COUNT(ps.pending_painpoint_id) AS actual
+                SELECT p.id, p.signal_count,
+                       COUNT(pas.pending_painpoint_id) AS actual
                 FROM painpoints p
                 LEFT JOIN painpoint_sources ps ON ps.painpoint_id = p.id
+                LEFT JOIN pending_painpoint_all_sources pas
+                    ON pas.pending_painpoint_id = ps.pending_painpoint_id
                 GROUP BY p.id
                 HAVING p.signal_count != actual
-                """
+"""
             ).fetchall()
             assert mismatches == []
 
@@ -3917,3 +3926,184 @@ class TestMergeCategoriesDescription:
             )
         finally:
             conn.close()
+
+
+class TestPendingDedupAtSave:
+    """save_pending_painpoints_batch deduplicates via pending_painpoint_vec
+    when an embedder is supplied. Near-duplicate observations become
+    pending_painpoint_sources of the first matching pending, not new rows."""
+
+    def test_no_embedder_preserves_legacy_behavior(self, fresh_db):
+        """Without an embedder, every item becomes its own pending (back-compat)."""
+        post_ids = [_make_post(f"t3_dup{i}", age_seconds=3600) for i in range(3)]
+        items = [
+            {"post_id": pid,
+             "title": "Kubernetes pod eviction during autoscaling",
+             "description": "Pod evictions happen every time autoscaler fires",
+             "severity": 7, "category_name": None}
+            for pid in post_ids
+        ]
+        ids = db.painpoints.save_pending_painpoints_batch(items)
+        assert len(ids) == 3
+        assert len(set(ids)) == 3   # three distinct pending rows
+
+    def test_embedder_dedupes_within_batch(self, fresh_db):
+        """Three paraphrases in the same batch collapse to ONE pending row
+        with the other two linked as pending_painpoint_sources. After
+        promote, signal_count reflects all 3 observations, not 1."""
+        embedder = FakeEmbedder()
+        post_ids = [_make_post(f"t3_para{i}", age_seconds=3600) for i in range(3)]
+        # FakeEmbedder is word-hash based: identical titles → cos=1.0.
+        items = [
+            {"post_id": pid,
+             "title": "FastAPI slow startup with large dependency graph",
+             "description": "FastAPI takes forever to boot when there are lots of deps",
+             "severity": 6, "category_name": None}
+            for pid in post_ids
+        ]
+        ids = db.painpoints.save_pending_painpoints_batch(items, embedder=embedder)
+        assert len(ids) == 3
+        assert len(set(ids)) == 1   # all collapsed to the first pending
+
+        conn = db.get_db()
+        try:
+            # Pending table has exactly 1 row
+            n_pending = conn.execute(
+                "SELECT COUNT(*) FROM pending_painpoints"
+            ).fetchone()[0]
+            assert n_pending == 1
+
+            # pending_painpoint_sources has 2 extras (the dedup attributions)
+            n_extras = conn.execute(
+                "SELECT COUNT(*) FROM pending_painpoint_sources "
+                "WHERE pending_painpoint_id = ?", (ids[0],),
+            ).fetchone()[0]
+            assert n_extras == 2
+
+            # pending_painpoint_all_sources view returns 3 total observations
+            n_sources = conn.execute(
+                "SELECT COUNT(*) FROM pending_painpoint_all_sources "
+                "WHERE pending_painpoint_id = ?", (ids[0],),
+            ).fetchone()[0]
+            assert n_sources == 3
+        finally:
+            conn.close()
+
+        # Promote and verify signal_count = 3 (not 1): a new painpoint
+        # minted from a pending with extras must absorb all observations.
+        pp_id = promote_pending(ids[0], embedder=embedder)
+        conn = db.get_db()
+        try:
+            sig = conn.execute(
+                "SELECT signal_count FROM painpoints WHERE id = ?", (pp_id,),
+            ).fetchone()["signal_count"]
+            assert sig == 3, (
+                f"expected signal_count=3 after promoting a pending with "
+                f"2 dedup-extras, got {sig}"
+            )
+        finally:
+            conn.close()
+
+    def test_embedder_dedupes_across_batches(self, fresh_db):
+        """A later batch containing a near-duplicate of an earlier pending
+        links to the existing row rather than spawning a new pending."""
+        embedder = FakeEmbedder()
+        p1 = _make_post("t3_b1", age_seconds=3600)
+        p2 = _make_post("t3_b2", age_seconds=3600)
+
+        # FakeEmbedder maps word-bags: identical bags → cos=1, most-overlap
+        # bags → ~0.7+. Titles+descriptions here share ~85% of tokens.
+        ids1 = db.painpoints.save_pending_painpoints_batch(
+            [{"post_id": p1,
+              "title": "Postgres connection pool exhaustion on spike",
+              "description": "Postgres connection pool exhaustion under spike",
+              "severity": 8, "category_name": None}],
+            embedder=embedder,
+        )
+        assert len(ids1) == 1
+
+        ids2 = db.painpoints.save_pending_painpoints_batch(
+            [{"post_id": p2,
+              "title": "Postgres connection pool exhaustion on spike",
+              "description": "Postgres connection pool exhaustion at spike",
+              "severity": 7, "category_name": None}],
+            embedder=embedder,
+        )
+        assert ids2 == ids1   # merged into the batch-1 pending
+
+        conn = db.get_db()
+        try:
+            # Still only 1 pending row in total
+            n = conn.execute("SELECT COUNT(*) FROM pending_painpoints").fetchone()[0]
+            assert n == 1
+        finally:
+            conn.close()
+
+    def test_dedup_bumps_signal_count_of_promoted_painpoint(self, fresh_db):
+        """If the target pending has already been promoted, dedup must bump
+        the linked painpoint's signal_count so the new evidence is
+        counted. Otherwise deduped topics would underreport their signal."""
+        embedder = FakeEmbedder()
+        p1 = _make_post("t3_bump1", age_seconds=3600)
+        p2 = _make_post("t3_bump2", age_seconds=3600)
+
+        # FakeEmbedder: identical word bags → cos=1. Both batches here
+        # use the same title+description tokens to guarantee dedup fires.
+        ids1 = db.painpoints.save_pending_painpoints_batch(
+            [{"post_id": p1,
+              "title": "GraphQL n+1 query performance",
+              "description": "GraphQL n+1 query performance problem",
+              "severity": 8, "category_name": None}],
+            embedder=embedder,
+        )
+        pp_id = promote_pending(ids1[0], embedder=embedder)
+
+        conn = db.get_db()
+        try:
+            sig_before = conn.execute(
+                "SELECT signal_count FROM painpoints WHERE id = ?", (pp_id,),
+            ).fetchone()["signal_count"]
+            assert sig_before == 1
+        finally:
+            conn.close()
+
+        # New batch with an equivalent paraphrase — dedup onto the
+        # already-promoted pending.
+        ids2 = db.painpoints.save_pending_painpoints_batch(
+            [{"post_id": p2,
+              "title": "GraphQL n+1 query performance",
+              "description": "GraphQL n+1 query performance problem",
+              "severity": 7, "category_name": None}],
+            embedder=embedder,
+        )
+        assert ids2 == ids1
+
+        conn = db.get_db()
+        try:
+            sig_after = conn.execute(
+                "SELECT signal_count FROM painpoints WHERE id = ?", (pp_id,),
+            ).fetchone()["signal_count"]
+            assert sig_after == 2, (
+                f"expected signal_count=2 after dedup-onto-promoted, got {sig_after}"
+            )
+        finally:
+            conn.close()
+
+    def test_distinct_observations_are_NOT_merged(self, fresh_db):
+        """Two different complaints should stay as separate pendings even
+        at the pending-dedup stage."""
+        embedder = FakeEmbedder()
+        p1 = _make_post("t3_a", age_seconds=3600)
+        p2 = _make_post("t3_b", age_seconds=3600)
+        items = [
+            {"post_id": p1,
+             "title": "Kubernetes pod eviction during autoscaling",
+             "description": "Pods get evicted when autoscaler fires",
+             "severity": 8, "category_name": None},
+            {"post_id": p2,
+             "title": "React server components hydration mismatch",
+             "description": "Hydration errors in RSC apps",
+             "severity": 6, "category_name": None},
+        ]
+        ids = db.painpoints.save_pending_painpoints_batch(items, embedder=embedder)
+        assert len(set(ids)) == 2   # distinct topics stay distinct

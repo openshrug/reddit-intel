@@ -228,7 +228,10 @@ class TestRealSubreddits:
                 SELECT COUNT(*) FROM (
                   SELECT p.id FROM painpoints p
                   LEFT JOIN painpoint_sources ps ON ps.painpoint_id = p.id
-                  GROUP BY p.id HAVING p.signal_count != COUNT(ps.pending_painpoint_id)
+                  LEFT JOIN pending_painpoint_all_sources pas
+                      ON pas.pending_painpoint_id = ps.pending_painpoint_id
+                  GROUP BY p.id
+                  HAVING p.signal_count != COUNT(pas.pending_painpoint_id)
                 )
             """).fetchone()[0]
             print(f"  Total painpoints:         {total_pp}")

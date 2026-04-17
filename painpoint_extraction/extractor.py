@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from db import get_db
 from db.categories import get_category_list_flat
+from db.embeddings import OpenAIEmbedder
 from db.painpoints import save_pending_painpoints_batch
 from db.posts import get_comments_for_post, get_posts_by_ids
 from llm import TokenCounter, get_client, llm_call
@@ -191,8 +192,16 @@ async def extract_painpoints(post_ids, *, batch_token_budget=BATCH_TOKEN_BUDGET)
         log.info("extract: no painpoints found")
         return [], usage
 
-    ids = save_pending_painpoints_batch(items)
-    log.info("extract: saved %d pending painpoints", len(ids))
+    # Pass an embedder so near-duplicate observations across batches and
+    # within this batch collapse into one pending row (with extra sources
+    # linked via pending_painpoint_sources) instead of piling up as
+    # near-copies the frontend would render as duplicates.
+    ids = save_pending_painpoints_batch(items, embedder=OpenAIEmbedder())
+    unique_ids = len(set(ids))
+    log.info(
+        "extract: saved %d pending painpoints (%d unique; %d deduped)",
+        len(ids), unique_ids, len(ids) - unique_ids,
+    )
     return ids, usage
 
 

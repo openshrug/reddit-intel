@@ -19,6 +19,14 @@ import struct
 EMBEDDING_MODEL = "text-embedding-3-small"
 EMBEDDING_DIM = 1536
 MERGE_COSINE_THRESHOLD = 0.60   # above this -> merge into existing painpoint
+# Pending-stage dedup threshold. Stricter than MERGE_COSINE_THRESHOLD
+# because pending dedup is about paraphrases of the SAME observation
+# (e.g. the LLM emits "Slow FastAPI startup" from one post and "FastAPI
+# app takes forever to boot" from another — same complaint, different
+# wording). Painpoint merge at 0.60 is a topic-level merge; pending
+# merge at 0.65 is an observation-level merge, so we lean tighter to
+# avoid collapsing genuinely distinct observations of adjacent topics.
+PENDING_MERGE_THRESHOLD = 0.65
 # Tuned empirically:
 #   same-topic paraphrases (colloquial): 0.72-0.78 cosine sim
 #   same-topic LLM-condensed titles:     0.55-0.70 cosine sim (shorter, more formal)
@@ -177,7 +185,10 @@ def init_vec_tables(conn):
 
     Must be called after sqlite_vec.load(conn).
 
-    Three tables:
+    Four tables:
+    - pending_painpoint_vec: one row per pending_painpoint, populated at
+      save time so the extractor can dedupe against existing pendings
+      (cross-batch and within-batch) before inserting a new row.
     - painpoint_vec: one row per painpoint, embedding of its text.
     - category_vec: the blended vector used for matching (see
       update_category_embedding). Queried by find_best_category.
@@ -186,6 +197,11 @@ def init_vec_tables(conn):
       description changes. Blended with the member mean to produce
       category_vec.
     """
+    conn.execute(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS pending_painpoint_vec USING vec0("
+        "    embedding float[1536] distance_metric=cosine"
+        ")"
+    )
     conn.execute(
         "CREATE VIRTUAL TABLE IF NOT EXISTS painpoint_vec USING vec0("
         "    embedding float[1536] distance_metric=cosine"
@@ -230,6 +246,59 @@ def store_painpoint_embedding(conn, painpoint_id, embedding):
         "INSERT INTO painpoint_vec (rowid, embedding) VALUES (?, ?)",
         (painpoint_id, blob),
     )
+
+
+def store_pending_painpoint_embedding(conn, pending_id, embedding):
+    """INSERT OR REPLACE into pending_painpoint_vec. Populated by the
+    extractor at pending-save time so cross-batch dedup can query it.
+    The promoter reads this first and only re-embeds on miss."""
+    blob = _pack_embedding(embedding)
+    conn.execute(
+        "DELETE FROM pending_painpoint_vec WHERE rowid = ?", (pending_id,)
+    )
+    conn.execute(
+        "INSERT INTO pending_painpoint_vec (rowid, embedding) VALUES (?, ?)",
+        (pending_id, blob),
+    )
+
+
+def get_pending_painpoint_embedding(conn, pending_id):
+    """Return a pending painpoint's stored embedding as a list of floats,
+    or None if no row (pending inserted before pending_painpoint_vec
+    existed, or the embedder was None at save time)."""
+    row = conn.execute(
+        "SELECT embedding FROM pending_painpoint_vec WHERE rowid = ?",
+        (pending_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    blob = row[0]
+    if len(blob) != EMBEDDING_DIM * 4:
+        return None
+    return list(struct.unpack(f"{EMBEDDING_DIM}f", blob))
+
+
+def find_most_similar_pending(conn, embedding, threshold=PENDING_MERGE_THRESHOLD):
+    """KNN over pending_painpoint_vec. Returns (pending_id, cos) for the
+    closest pending above `threshold`, or None.
+
+    Used by save_pending_painpoints_batch to decide "is this new
+    extraction already represented by an existing pending row?" — if so,
+    we tack the new evidence onto that pending via pending_painpoint_sources
+    instead of creating another near-duplicate row.
+    """
+    blob = _pack_embedding(embedding)
+    rows = conn.execute(
+        "SELECT rowid, distance FROM pending_painpoint_vec "
+        "WHERE embedding MATCH ? ORDER BY distance LIMIT 1",
+        (blob,),
+    ).fetchall()
+    if not rows:
+        return None
+    cos = 1.0 - rows[0][1]
+    if cos < threshold:
+        return None
+    return (rows[0][0], cos)
 
 
 def store_category_embedding(conn, category_id, embedding):
