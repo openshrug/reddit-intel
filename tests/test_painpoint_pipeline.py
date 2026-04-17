@@ -4107,3 +4107,189 @@ class TestPendingDedupAtSave:
         ]
         ids = db.painpoints.save_pending_painpoints_batch(items, embedder=embedder)
         assert len(set(ids)) == 2   # distinct topics stay distinct
+
+
+class TestPainpointMergeAtSweep:
+    """propose_painpoint_merge_events finds near-duplicate painpoints
+    within a category and merges them when the LLM agrees."""
+
+    def test_llm_says_no_keeps_both(self, fresh_db):
+        """FakeNamer returns duplicates=False by default → no merge."""
+        from db.category_events import propose_painpoint_merge_events
+        embedder = FakeEmbedder()
+        # Two painpoints in the same category whose cosine exceeds the
+        # candidate threshold but the LLM says "not duplicates".
+        titles = [
+            "Community overwhelmed by low-quality AI-generated content",
+            "Community overwhelmed by unhelpful AI-generated content",
+        ]
+        pp_ids = []
+        for t in titles:
+            post_id = _make_post(
+                f"t3_{abs(hash(t)) % 10000}", age_seconds=3600,
+            )
+            pending_id = save_pending_painpoint(
+                post_id, t, description=t, severity=6,
+            )
+            pp_id = promote_pending(pending_id, embedder=embedder)
+            pp_ids.append(pp_id)
+
+        # Both should have been linked under the SAME painpoint if cosine
+        # ≥ 0.60; but with varied wording, cosine likely < 0.60 and they
+        # stay separate — which is exactly the case this feature targets.
+        conn = db.get_db()
+        try:
+            # Move both into the same category if they aren't already
+            cat_row = conn.execute(
+                "SELECT category_id FROM painpoints WHERE id = ?", (pp_ids[0],)
+            ).fetchone()
+            conn.execute(
+                "UPDATE painpoints SET category_id = ? WHERE id = ?",
+                (cat_row["category_id"], pp_ids[1]),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        conn = db.get_db()
+        try:
+            events = list(propose_painpoint_merge_events(
+                conn, namer=FakeNamer(), embedder=embedder,
+            ))
+        finally:
+            conn.close()
+
+        # FakeNamer default is duplicates=False → no events.
+        assert events == []
+
+    def test_llm_says_yes_merges_and_sums_signal(self, fresh_db):
+        """With a namer that returns duplicates=True, the sweep merges
+        the pair, summing signal_count and retiring the loser."""
+        from db.category_events import propose_painpoint_merge_events
+        from db.llm_naming import PainpointMergeDecision
+
+        class _YesNamer(FakeNamer):
+            def decide_painpoint_merge(self, *args, **kwargs):
+                return PainpointMergeDecision(
+                    duplicates=True, reason="fake: always merge",
+                )
+
+        embedder = FakeEmbedder()
+        # FakeEmbedder is word-hash → vector; pairs with heavy token
+        # overlap (only one unique word) sit well above the candidate
+        # threshold. Add enough unique tokens to keep them separate from
+        # each other (so promoter didn't merge them at 0.60) but still
+        # above the merge CANDIDATE threshold (0.50).
+        post_a = _make_post("t3_m_a", age_seconds=3600)
+        post_b = _make_post("t3_m_b", age_seconds=3600)
+        # 5 unique extras per side keeps FakeEmbedder cos ≈ 0.53 —
+        # above the candidate floor (0.50) but below the promoter's
+        # auto-merge (0.60), which is exactly the zone this pass targets.
+        a_extras = " ".join(f"a{i}" for i in range(5))
+        b_extras = " ".join(f"b{i}" for i in range(5))
+        pending_a = save_pending_painpoint(
+            post_a, f"community overwhelmed by low-quality AI content {a_extras}",
+            description=f"community overwhelmed by low-quality AI content {a_extras}",
+            severity=6,
+        )
+        pp_a = promote_pending(pending_a, embedder=embedder)
+        pending_b = save_pending_painpoint(
+            post_b, f"community overwhelmed by low-quality AI content {b_extras}",
+            description=f"community overwhelmed by low-quality AI content {b_extras}",
+            severity=7,
+        )
+        pp_b = promote_pending(pending_b, embedder=embedder)
+
+        # Place both into a NON-Uncategorized category (propose_painpoint_merge
+        # skips Uncategorized). Pick any seed category with id != Uncategorized.
+        conn = db.get_db()
+        try:
+            uncat = conn.execute(
+                "SELECT id FROM categories WHERE name = 'Uncategorized'",
+            ).fetchone()["id"]
+            real_cat = conn.execute(
+                "SELECT id FROM categories WHERE id != ? LIMIT 1", (uncat,),
+            ).fetchone()["id"]
+            conn.execute(
+                "UPDATE painpoints SET category_id = ? WHERE id IN (?, ?)",
+                (real_cat, pp_a, pp_b),
+            )
+            # Bump each to distinguishable signal_counts so the merge
+            # logic has something to sum.
+            conn.execute(
+                "UPDATE painpoints SET signal_count = 3 WHERE id = ?", (pp_a,),
+            )
+            conn.execute(
+                "UPDATE painpoints SET signal_count = 2 WHERE id = ?", (pp_b,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        summary = run_sweep(namer=_YesNamer(), embedder=embedder)
+        # The merge step proposed at least one event, and it was accepted.
+        assert summary["painpoint_merge"]["accepted"] >= 1, (
+            f"expected ≥1 painpoint_merge accept, got {summary}"
+        )
+
+        conn = db.get_db()
+        try:
+            remaining = conn.execute(
+                "SELECT id, signal_count FROM painpoints WHERE id IN (?, ?)",
+                (pp_a, pp_b),
+            ).fetchall()
+            # One of the two was retired, the other absorbed both signals.
+            assert len(remaining) == 1, (
+                f"expected 1 survivor, got {len(remaining)}"
+            )
+            assert remaining[0]["signal_count"] == 5, (
+                f"expected summed signal_count=5 (3+2), got "
+                f"{remaining[0]['signal_count']}"
+            )
+        finally:
+            conn.close()
+
+    def test_distinct_pairs_below_threshold_not_proposed(self, fresh_db):
+        """Cos < PAINPOINT_DEDUP_CANDIDATE_THRESHOLD → never sent to the
+        LLM, never proposed for merge."""
+        from db.category_events import propose_painpoint_merge_events
+
+        embedder = FakeEmbedder()
+        post_a = _make_post("t3_far_a", age_seconds=3600)
+        post_b = _make_post("t3_far_b", age_seconds=3600)
+        # Maximally-different titles — FakeEmbedder word-hash lands cos < 0.3
+        pending_a = save_pending_painpoint(
+            post_a, "Kubernetes pod eviction during autoscaling",
+            description="Pods evicted under autoscale", severity=7,
+        )
+        pp_a = promote_pending(pending_a, embedder=embedder)
+        pending_b = save_pending_painpoint(
+            post_b, "Dating app ghosting after matching",
+            description="Matches ghost without replying", severity=6,
+        )
+        pp_b = promote_pending(pending_b, embedder=embedder)
+        conn = db.get_db()
+        try:
+            cat_id = conn.execute(
+                "SELECT category_id FROM painpoints WHERE id = ?", (pp_a,),
+            ).fetchone()["category_id"]
+            conn.execute(
+                "UPDATE painpoints SET category_id = ? WHERE id = ?",
+                (cat_id, pp_b),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        class _ShouldNeverBeCalled(FakeNamer):
+            def decide_painpoint_merge(self, *args, **kwargs):
+                raise AssertionError("LLM should not be called below threshold")
+
+        conn = db.get_db()
+        try:
+            events = list(propose_painpoint_merge_events(
+                conn, namer=_ShouldNeverBeCalled(), embedder=embedder,
+            ))
+        finally:
+            conn.close()
+        assert events == []

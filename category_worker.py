@@ -16,6 +16,7 @@ from db.category_events import (
     prefetch_llm_batch,
     propose_delete_events,
     propose_merge_events,
+    propose_painpoint_merge_events,
     propose_reroute_events,
     propose_split_events,
     propose_uncategorized_events,
@@ -53,6 +54,7 @@ def run_sweep(namer=None, embedder=None):
         "split":                {"proposed": 0, "accepted": 0},
         "delete":               {"proposed": 0, "accepted": 0},
         "merge":                {"proposed": 0, "accepted": 0},
+        "painpoint_merge":      {"proposed": 0, "accepted": 0},
         "reroute":              {"proposed": 0, "accepted": 0},
     }
 
@@ -104,6 +106,20 @@ def run_sweep(namer=None, embedder=None):
                 summary["merge"]["proposed"] += 1
                 if apply_with_test(conn, event, namer, embedder=embedder):
                     summary["merge"]["accepted"] += 1
+
+            # Step 4.5 -- painpoint-level dedup inside a category.
+            # Finds near-duplicate painpoints the promoter's 0.60 threshold
+            # missed (wording varied into the 0.50-0.60 zone) and confirms
+            # each pair with an LLM boolean call. Runs BEFORE reroute so
+            # the post-merge state is what reroute evaluates, and AFTER
+            # delete/category-merge so we don't merge painpoints about to
+            # change categories.
+            for event in list(propose_painpoint_merge_events(
+                conn, namer=namer, embedder=embedder,
+            )):
+                summary["painpoint_merge"]["proposed"] += 1
+                if apply_with_test(conn, event, namer, embedder=embedder):
+                    summary["painpoint_merge"]["accepted"] += 1
 
             # Step 5 -- per-painpoint reroute (no LLM calls, pure embedding).
             # Handles singleton mis-routings the split step can't cluster.

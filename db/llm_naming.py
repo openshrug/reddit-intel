@@ -37,6 +37,19 @@ class SplitDecision(BaseModel):
     )
 
 
+class PainpointMergeDecision(BaseModel):
+    """LLM judgement on whether two painpoints are the same pain expressed
+    differently. Tie-breaker for the 0.50-0.60 cosine zone where pure
+    embedding similarity gives ambiguous signal."""
+    duplicates: bool = Field(
+        description="True if A and B describe the same underlying pain "
+                    "(even if worded differently). False if they describe "
+                    "related-but-distinct pains (e.g., 'slow AI image "
+                    "generation' vs 'high AI image generation cost')."
+    )
+    reason: str = Field(description="One-sentence rationale")
+
+
 class UncatDecision(BaseModel):
     """LLM review of a single Uncategorized painpoint. Either mints a
     new category anchored at some existing parent, or leaves the
@@ -259,6 +272,42 @@ class LLMNamer:
         })
         return self._call_structured(system, user, UncatDecision, max_tokens=600)
 
+    def decide_painpoint_merge(
+        self, a_title: str, a_description: str,
+        b_title: str, b_description: str,
+    ) -> PainpointMergeDecision:
+        """Decide whether two painpoints are the same pain expressed with
+        different wording. Called inside the sweep for candidate pairs
+        whose cosine similarity is in the ambiguous zone where embeddings
+        alone can't distinguish duplicate from adjacent.
+
+        Returns a PainpointMergeDecision with `.duplicates` bool.
+        """
+        system = (
+            "You are reviewing two user painpoints extracted from Reddit. "
+            "Decide whether they describe the SAME underlying pain or "
+            "different pains. Examples:\n"
+            "  - 'Slow AI image generation' vs 'Long wait times for AI "
+            "images' → DUPLICATES (same pain, different words)\n"
+            "  - 'Slow AI image generation' vs 'High cost of AI image "
+            "generation' → NOT duplicates (speed vs cost are distinct)\n"
+            "  - 'Community overwhelmed by low-quality AI content' vs "
+            "'Subreddit flooded with AI slop' → DUPLICATES (both about "
+            "AI content volume ruining the community)\n"
+            "  - 'Difficulty sharing genuine projects' vs 'Community "
+            "moderation for AI content' → NOT duplicates (self-sharing "
+            "is about the poster, moderation is about the community)\n\n"
+            "Be conservative: only return duplicates=true when the pains "
+            "are interchangeable from a user's perspective."
+        )
+        user = json.dumps({
+            "A": {"title": a_title, "description": a_description or ""},
+            "B": {"title": b_title, "description": b_description or ""},
+        })
+        return self._call_structured(
+            system, user, PainpointMergeDecision, max_tokens=300,
+        )
+
     def describe_merged_category(self, survivor_name: str, loser_name: str,
                                   sample_member_titles: List[str]):
         """After merging two categories, generate an updated description
@@ -318,6 +367,15 @@ class FakeNamer:
         spawn new categories. Override via name_fn/split_fn isn't wired here
         — callers that need create-paths should inject their own namer."""
         return UncatDecision(action="keep", reason="fake: default keep")
+
+    def decide_painpoint_merge(self, a_title, a_description,
+                                b_title, b_description):
+        """Test double: default to `duplicates=False` so hermetic tests
+        don't spuriously merge painpoints. Tests that need a merge-path
+        should inject their own namer."""
+        return PainpointMergeDecision(
+            duplicates=False, reason="fake: default no-merge",
+        )
 
     def decide_split(self, category_name, category_description, total_members, clusters):
         """Test double: always returns 'keep' unless clusters has ≥2 clusters

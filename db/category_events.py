@@ -43,9 +43,13 @@ from .relevance import _parse_iso
 
 MIN_SUB_CLUSTER_SIZE = 3
 # Maximum fan-out for parallel LLM calls (prefetch + decide_split +
-# uncat-review). Capped below the global OPENAI_CONCURRENCY=10 so we
-# don't monopolise the semaphore if extraction is still running.
-_LLM_PARALLEL_WORKERS = 5
+# uncat-review + painpoint_merge). Raised from 5 → 30 after observing
+# uncat-review was the dominant sweep cost at ~135 calls × 2s / 5
+# workers ≈ 55s. With 30 workers the same batch finishes in ~10s.
+# The global OPENAI_API_SEMAPHORE (see llm.py) is raised to match —
+# the sweep runs standalone (no concurrent extraction), so there's no
+# other consumer to contend with.
+_LLM_PARALLEL_WORKERS = 30
 # Lowered from 5 after a live-sweep pass over 145 Uncategorized
 # members fired 0 add_category_new events: clusters of 3-4 related
 # painpoints (screenshot tooling, paywall design, etc.) sat just below
@@ -61,6 +65,19 @@ MERGE_CATEGORY_THRESHOLD = 0.80
 # stricter 0.80 because those are already scoped to one parent's topic
 # and an 0.70 match there would over-merge genuine siblings.
 MERGE_ROOT_CATEGORY_THRESHOLD = 0.70
+# Painpoint-pair dedup at sweep time — embedding cosine is the CANDIDATE
+# filter, LLM is the TIE-BREAKER. The promoter runs at
+# MERGE_COSINE_THRESHOLD=0.60 and misses "same pain, different wording"
+# pairs that cluster in the 0.50-0.60 zone. This sweep pass picks up
+# those residual duplicates within the same category, confirmed by an
+# LLM boolean call per candidate. Per-category caps the cost at O(N²)
+# local compute + at most K LLM calls per category.
+PAINPOINT_DEDUP_CANDIDATE_THRESHOLD = 0.50
+# Max candidate pairs examined per category per sweep. Bounds LLM cost
+# (~$0.001 per call × MAX_PAINPOINT_MERGES_PER_CATEGORY × N_categories).
+# Within a single category, we rank pairs by cosine DESC and cut at this
+# many — the highest-cos pairs are the most-likely duplicates.
+MAX_PAINPOINT_MERGES_PER_CATEGORY = 20
 # A category with no member added/updated in this many days is stale —
 # propose delete. Replaces the old mass-based threshold (which was a size
 # test dressed up as a quality test).
@@ -663,6 +680,195 @@ def _test_delete_category(conn, event):
 
 
 # ---------------------------------------------------------------------------
+# Step 4.5 — painpoint-level dedup inside a category
+# Residual duplicates that the promoter's 0.60 cosine merge missed
+# (because wording varied enough to push cos into the 0.50-0.60 zone).
+# Candidate pairs come from a within-category pairwise cosine scan;
+# each candidate is confirmed by a cheap LLM boolean call before merge.
+# ---------------------------------------------------------------------------
+
+
+def propose_painpoint_merge_events(conn, namer=None, embedder=None):
+    """For each category, find painpoint pairs with cosine ≥
+    PAINPOINT_DEDUP_CANDIDATE_THRESHOLD and LLM-confirm whether they
+    are duplicates. Emits one `painpoint_merge` event per confirmed pair.
+
+    Within-category only: merging across categories would require a
+    category move + a merge, and the category placement is handled by
+    reroute. Keeping the scan local also bounds the O(N²) pairwise
+    comparison to at most MAX_MEMBERS_PER_CATEGORY² per category.
+    """
+    if namer is None:
+        from .llm_naming import LLMNamer
+        namer = LLMNamer()
+
+    uncat_id = _uncategorized_id(conn)
+    cat_rows = conn.execute(
+        "SELECT id FROM categories WHERE id != COALESCE(?, -1)",
+        (uncat_id,),
+    ).fetchall()
+
+    # Phase 1: build candidate pairs from pairwise cosine (no LLM).
+    # We collect (cat_id, pp_a, pp_b, cos) tuples, ranking by cos DESC
+    # within each category, capped at MAX_PAINPOINT_MERGES_PER_CATEGORY.
+    candidates_by_cat = {}
+    for cat_row in cat_rows:
+        cat_id = cat_row["id"]
+        members = list(iter_category_member_embeddings(conn, cat_id))
+        if len(members) < 2:
+            continue
+
+        meta_rows = conn.execute(
+            f"SELECT id, title, description, signal_count "
+            f"FROM painpoints WHERE id IN "
+            f"({in_clause_placeholders(len(members))})",
+            [m[0] for m in members],
+        ).fetchall()
+        meta = {r["id"]: r for r in meta_rows}
+
+        pairs = []
+        for i in range(len(members)):
+            id_i, emb_i = members[i]
+            for j in range(i + 1, len(members)):
+                id_j, emb_j = members[j]
+                cos = sum(x * y for x, y in zip(emb_i, emb_j))
+                if cos >= PAINPOINT_DEDUP_CANDIDATE_THRESHOLD:
+                    pairs.append((cos, id_i, id_j))
+
+        if not pairs:
+            continue
+        pairs.sort(reverse=True)   # highest cos first
+        candidates_by_cat[cat_id] = (pairs[:MAX_PAINPOINT_MERGES_PER_CATEGORY], meta)
+
+    # Phase 2: LLM-confirm each candidate in parallel (fan out across all
+    # categories, not just within one). Each decision is independent of
+    # the rest, so the global fan-out is safe.
+    specs = []
+    pair_map = {}   # key -> (cat_id, pp_a, pp_b, cos, meta_a, meta_b)
+    for cat_id, (pairs, meta) in candidates_by_cat.items():
+        for cos, id_i, id_j in pairs:
+            a, b = meta[id_i], meta[id_j]
+            key = (cat_id, id_i, id_j)
+            pair_map[key] = (cat_id, id_i, id_j, cos, a, b)
+            specs.append(
+                (key,
+                 (lambda a=a, b=b: namer.decide_painpoint_merge(
+                     a["title"], a["description"] or "",
+                     b["title"], b["description"] or "",
+                 )))
+            )
+
+    if not specs:
+        return
+    decisions, _errors = parallel_namer_calls(specs)
+
+    # Phase 3: yield events, picking survivor = higher signal_count,
+    # tie-break by lower id. Skip painpoints already involved in an
+    # earlier event this sweep so cascades don't propose merging
+    # already-retired painpoints.
+    retired = set()
+    for key, (cat_id, id_i, id_j, cos, a, b) in pair_map.items():
+        decision = decisions.get(key)
+        if decision is None or not decision.duplicates:
+            continue
+        if id_i in retired or id_j in retired:
+            continue
+        # Survivor = higher signal_count; tie-break by lower id.
+        if (a["signal_count"] or 0) >= (b["signal_count"] or 0):
+            survivor_id, loser_id = id_i, id_j
+        else:
+            survivor_id, loser_id = id_j, id_i
+        retired.add(loser_id)
+        yield CategoryEvent(
+            event_type="painpoint_merge",
+            payload={
+                "survivor_id": survivor_id,
+                "loser_id": loser_id,
+                "category_id": cat_id,
+            },
+            target_category=cat_id,
+            triggering_pp=loser_id,
+            metric_name="painpoint_merge_cos",
+            metric_value=cos,
+            threshold=PAINPOINT_DEDUP_CANDIDATE_THRESHOLD,
+        )
+
+
+def _test_painpoint_merge(conn, event):
+    """Cascade-safe: survivor and loser must both still exist and still
+    be in the claimed category. An earlier event in the sweep may have
+    already merged one of them."""
+    survivor_id = event.payload["survivor_id"]
+    loser_id = event.payload["loser_id"]
+    expected_cat = event.payload["category_id"]
+    rows = conn.execute(
+        f"SELECT id, category_id FROM painpoints WHERE id IN "
+        f"({in_clause_placeholders(2)})",
+        [survivor_id, loser_id],
+    ).fetchall()
+    by_id = {r["id"]: r for r in rows}
+    if survivor_id not in by_id or loser_id not in by_id:
+        return False, "cascade: survivor or loser already retired"
+    if by_id[survivor_id]["category_id"] != expected_cat:
+        return False, "cascade: survivor moved categories"
+    if by_id[loser_id]["category_id"] != expected_cat:
+        return False, "cascade: loser moved categories"
+    return True, f"cos {event.metric_value:.3f}"
+
+
+def _apply_painpoint_merge(conn, event, namer, embedder=None):
+    """Merge loser into survivor:
+      - repoint all painpoint_sources rows from loser to survivor
+      - sum signal_count into survivor
+      - remove loser from category centroid (incremental delta)
+      - delete loser's painpoint_vec and categories-embedding side-effects
+      - delete loser from painpoints
+    """
+    del namer   # no LLM call in apply — decision already made in propose
+    survivor_id = event.payload["survivor_id"]
+    loser_id = event.payload["loser_id"]
+    cat_id = event.payload["category_id"]
+
+    # Aggregate signal_count before repointing sources. Repointing moves
+    # the painpoint_sources rows to survivor; duplicates (both painpoints
+    # linked to same pending — shouldn't happen but defend) are ignored.
+    loser_signal = conn.execute(
+        "SELECT signal_count FROM painpoints WHERE id = ?", (loser_id,),
+    ).fetchone()["signal_count"]
+
+    conn.execute(
+        "UPDATE OR IGNORE painpoint_sources "
+        "SET painpoint_id = ? WHERE painpoint_id = ?",
+        (survivor_id, loser_id),
+    )
+    # Any rows that couldn't be repointed (PK collision on
+    # (painpoint_id, pending_painpoint_id)) are stragglers — drop them.
+    conn.execute(
+        "DELETE FROM painpoint_sources WHERE painpoint_id = ?", (loser_id,),
+    )
+
+    conn.execute(
+        "UPDATE painpoints SET signal_count = signal_count + ?, "
+        "last_updated = ? WHERE id = ?",
+        (loser_signal or 0, _now(), survivor_id),
+    )
+
+    # Centroid update: loser's embedding leaves the category.
+    loser_emb = get_painpoint_embedding(conn, loser_id)
+    if loser_emb is not None:
+        remove_member_from_centroid(conn, cat_id, loser_emb)
+    else:
+        rebuild_centroid_from_members(conn, cat_id)
+
+    # Delete loser everywhere.
+    conn.execute("DELETE FROM painpoint_vec WHERE rowid = ?", (loser_id,))
+    conn.execute("DELETE FROM painpoints WHERE id = ?", (loser_id,))
+
+    update_category_embedding(conn, cat_id)
+    return survivor_id
+
+
+# ---------------------------------------------------------------------------
 # Step 5 — per-painpoint reroute (handles singleton mis-routings)
 # ---------------------------------------------------------------------------
 
@@ -896,6 +1102,7 @@ _TESTS = {
     "add_category_split": _test_add_category_split,
     "delete_category": _test_delete_category,
     "merge_categories": _test_merge_categories,
+    "painpoint_merge": _test_painpoint_merge,
     "reroute_painpoint": _test_reroute_painpoint,
 }
 
@@ -1284,6 +1491,7 @@ _APPLIERS = {
     "add_category_split": _apply_add_category_split,
     "delete_category": _apply_delete_category,
     "merge_categories": _apply_merge_categories,
+    "painpoint_merge": _apply_painpoint_merge,
     "reroute_painpoint": _apply_reroute_painpoint,
 }
 
