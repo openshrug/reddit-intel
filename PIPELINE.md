@@ -21,13 +21,20 @@ End state in the DB:
   painpoint, referencing N pendings via `painpoint_sources`.
 - `categories` — a tree of categories seeded from `taxonomy.yaml` and
   mutated at runtime by the category worker. Each row carries cached
-  centroid state (`member_emb_sum_blob`, `member_emb_count`) plus
-  activity timestamps (`centroid_updated_at`,
-  `member_set_last_changed_at`).
+  centroid state (`member_emb_sum_blob`, `member_emb_count`), activity
+  timestamps (`centroid_updated_at`, `member_set_last_changed_at`),
+  and an `is_seed` flag distinguishing human-curated seed categories
+  from LLM-minted runtime categories (drives per-category anchor
+  weight — see §6).
 - `painpoint_vec` / `category_vec` / `category_anchor_vec` — sqlite-vec
   virtual tables holding 1536-dim OpenAI embeddings (cosine distance).
   `category_vec` is the queryable blend; `category_anchor_vec` is the
   stable per-category name+description embedding.
+- `category_fts` — SQLite FTS5 virtual table over
+  `categories.(name, description)`, kept in lock-step with every
+  category write. Backs the BM25 side of the hybrid (BM25 + dense)
+  retrieval used by the split gate, uncat-review gate, and reroute —
+  see `db/category_retrieval.py` and §7.
 
 ---
 
@@ -175,10 +182,12 @@ category's blended vector.
 - `find_best_category_ranked(conn, emb, limit=50)` — full top-K for
   reroute logic.
 
-**Category vector is an anchor / mean blend:**
+**Category vector is an anchor / mean blend, weighted by seed-status:**
 
 ```
-category_vec = normalize(ANCHOR_WEIGHT · anchor + (1-ANCHOR_WEIGHT) · mean_of_members)
+category_vec = normalize(w · anchor + (1-w) · mean_of_members)
+  where w = ANCHOR_WEIGHT_SEED    (0.85)  if categories.is_seed = 1
+        w = ANCHOR_WEIGHT_RUNTIME (0.60)  if categories.is_seed = 0
 ```
 
 - `anchor` = embedding of `name + description` stored in
@@ -190,12 +199,19 @@ category_vec = normalize(ANCHOR_WEIGHT · anchor + (1-ANCHOR_WEIGHT) · mean_of_
   `add_member_to_centroid` / `remove_member_from_centroid` — O(1) per
   mutation. `rebuild_centroid_from_members` is the full-scan fallback
   used on bulk moves (delete, merge) and as a legacy-cache repair.
-- `ANCHOR_WEIGHT = 0.85` — the anchor dominates. Pure mean-of-members
-  (what we had before) drifted: one off-topic member pulled the
-  centroid, which made the next off-topic member easier to attract, a
-  feedback loop that produced the observed hijacking (e.g. "Generative
-  Media" absorbing "Cold Email Deliverability"). Anchoring stops the
-  drift; 0.15 member share still lets evidence modulate.
+- **Seed categories** have human-curated anchor text from
+  `taxonomy.yaml`; the 0.85 weight keeps the declared intent in charge
+  and prevents one off-topic member from dragging the centroid (the
+  old pure-mean blend exhibited hijacking — e.g. "Generative Media"
+  absorbing "Cold Email Deliverability"). 0.15 member share still lets
+  evidence modulate.
+- **Runtime-minted categories** have LLM-synthesized anchor text of
+  variable quality, so 0.60 gives members a stronger say. Dropping to
+  0.60 (from the seed 0.85) corrects for weak anchors without flipping
+  to pure-mean, keeping drift bounded.
+- `ANCHOR_WEIGHT` is kept as a backwards-compat alias pointing at
+  `ANCHOR_WEIGHT_SEED` for older callers/tests that referenced it as
+  a single constant.
 
 **Anchor helpers:** `store_category_anchor`, `get_category_anchor`,
 `delete_category_anchor`. `bootstrap_category_embeddings` seeds the
@@ -244,15 +260,24 @@ One sweep acquires `merge_lock` once and runs **six passes in order**:
 
 2. **Uncategorized singletons → LLM review → `add_category_new`** (Step 1b)
    `propose_uncategorized_singleton_events` takes the remaining Uncat
-   painpoints that clustering left behind, ranks them by
-   `signal_count × severity`, caps at top `MAX_UNCAT_LLM_REVIEWS=50`
-   per sweep, and asks `namer.decide_uncategorized` per painpoint (in
-   parallel). The LLM returns either `action="keep"` (no event) or
-   `action="create"` with a name / description / parent; the latter
-   yields an `add_category_new` event with the LLM response
-   pre-populated so the apply step skips a redundant naming call.
-   Prompt is **conservative** — default is keep, create only for
-   distinct actionable concerns with plausible future siblings.
+   painpoints that clustering left behind, **pre-filters** them by
+   nearest-category cosine (skip if >= `CATEGORY_COSINE_THRESHOLD` —
+   reroute will move those on its own), ranks the remainder by
+   `signal_count × severity`, and asks `namer.decide_uncategorized`
+   per painpoint (in parallel). The call gets a `nearest_hint=(name,
+   cosine)` tuple so the LLM can see what the closest existing
+   category is even though it's below the routing floor. The LLM
+   returns either `action="keep"` (no event) or `action="create"` with
+   a name / description / parent; the latter yields an
+   `add_category_new` event with the LLM response pre-populated so the
+   apply step skips a redundant naming call. Prompt is
+   **default-keep**, creates only when (a) no existing branch is a
+   reasonable home, (b) 3+ similar painpoints are plausibly incoming,
+   and (c) the proposed name isn't a near-synonym of an existing
+   entry. The pre-filter + tightened prompt together drove the
+   `add_category_new` ACCEPT rate from 170+/sweep to near zero in the
+   live E2E — reroute now handles what used to be the LLM's job for
+   painpoints with a plausible existing home.
 
 3. **Split crowded categories → `add_category_split`**
    `propose_split_events` skips categories below
@@ -281,10 +306,21 @@ One sweep acquires `merge_lock` once and runs **six passes in order**:
 
 6. **Reroute stragglers → `reroute_painpoint`**
    `propose_reroute_events` finds painpoints whose best-matching
-   category beats their current category by at least `REROUTE_MARGIN=0.08`
+   category beats their current category by at least `REROUTE_MARGIN=0.10`
    (leave-one-out centroid for current fit — otherwise a pp's own
    embedding dominates its category centroid and artificially inflates
    its current-sim).
+
+   **Hybrid retrieval** (`find_hybrid_candidates`): the best-other
+   candidate is the top result of RRF-fused BM25 + dense, not pure
+   dense top-K. BM25 over `category_fts` recalls keyword-rich
+   candidates (rare-token and product-name matches like "Stripe",
+   "ATS", "OAuth") that pure dense ranking was missing at rank 50+.
+   The margin test still compares dense cosines, so
+   REROUTE_MARGIN keeps its semantic meaning — hybrid only changes
+   which candidate gets tested. Live E2E: this collapsed
+   "Dating > Marketing and User Acquisition Challenges"-style
+   misroutings into their natural homes in `App Business`.
 
    **Skip logic:** a painpoint is safe to skip if it has been
    reroute-checked before (`painpoints.reroute_checked_at` is set),
@@ -293,6 +329,53 @@ One sweep acquires `merge_lock` once and runs **six passes in order**:
    (`max(categories.centroid_updated_at)`). Stamps
    `reroute_checked_at = now()` on every painpoint we evaluated this
    sweep. Turns O(N_pps × K_cats) into O(changed_pps × K_cats).
+
+### Creation gate + cross-parent replant (`db/category_retrieval.py`)
+
+Every `_apply_add_category_new` and `_apply_add_category_split` call
+runs proposal text through **hybrid retrieval** before minting a new
+`categories` row:
+
+```
+hybrid = RRF_K(60)-fuse( dense top-K over category_vec,
+                         BM25  top-K over category_fts )
+```
+
+Three outcomes per proposed sub-category (see `_decide_split_sub_fate`
+for the split path; `_maybe_route_to_similar` for add_category_new):
+
+- **Absorb** — top candidate's dense cosine >=
+  `SIMILAR_CATEGORY_THRESHOLD=0.60` → route pp_ids into the existing
+  category, skip the INSERT. Catches same-parent duplicates the split
+  pass would otherwise produce (e.g., split of `Video Tools` proposing
+  a sub called "Video Editing and Clipping" at cos 0.75 to the source).
+
+- **Replant** (split only) — top candidate's dense cos in
+  `[CROSS_PARENT_REPARENT_MIN_COS=0.45, SIMILAR_CATEGORY_THRESHOLD)`
+  AND it lives under a *different* root than the split source, AND
+  its dense cos beats the source's parent by >=
+  `CROSS_PARENT_REPARENT_MARGIN=0.10` → create the new sub under the
+  candidate's root instead of blindly inheriting the split source's
+  parent. The split LLM only sees the source's immediate context, so
+  a cluster of marketing-about-AI painpoints ends up proposed under
+  `AI/ML` even though it belongs under `App Business`. Replant
+  corrects the parent choice without a second LLM call.
+
+- **Create** — neither absorb nor replant fires → mint the new
+  category under the default parent (source's parent for split, LLM's
+  proposed parent for add_category_new).
+
+The accept gate uses **dense cosine** (not RRF score) because cosine
+has a measurable semantic band from probing the live tree (noise
+floor 0.21–0.32, distinct-siblings 0.34–0.53, duplicates 0.58–0.75);
+RRF scores have no intrinsic scale. BM25 contributes recall — it
+surfaces keyword-matching candidates dense top-K would have missed —
+but the final accept is a dense-cos check.
+
+`find_hybrid_candidates(conn, embedding, query_text, *, exclude_ids,
+top_k)` is the reusable primitive — also called by
+`propose_reroute_events` to pick the best-other candidate per
+painpoint.
 
 ### Event model (`CategoryEvent`)
 
@@ -401,42 +484,59 @@ it was "cascade from earlier merge" vs "apply error: foo".
 
 ## 9. Thresholds & tunables (quick reference)
 
-| Name                          | Where                | Value | Purpose                                     |
-| ----------------------------- | -------------------- | ----- | ------------------------------------------- |
-| `MERGE_COSINE_THRESHOLD`      | `db/embeddings.py`   | 0.60  | Promote link + sweep clustering.            |
-| `CATEGORY_COSINE_THRESHOLD`   | `db/embeddings.py`   | 0.35  | Below this → Uncategorized.                 |
-| `ANCHOR_WEIGHT`               | `db/embeddings.py`   | 0.85  | Anchor share of the blended category_vec.   |
-| `RELEVANCE_HALF_LIFE_DAYS`    | `db/relevance.py`    | 14    | Recency decay.                              |
-| `MIN_SUB_CLUSTER_SIZE`        | `db/category_events` | 3     | Min cluster size for a new category.        |
-| `MIN_CATEGORY_SIZE_FOR_SPLIT` | `db/category_events` | 10    | Won't split categories smaller than this.   |
-| `SPLIT_RECHECK_DELTA`         | `db/category_events` | 10    | Growth needed before re-asking LLM to split.|
-| `MERGE_CATEGORY_THRESHOLD`    | `db/category_events` | 0.80  | Sibling-merge threshold.                    |
-| `CATEGORY_STALE_DAYS`         | `db/category_events` | 30    | Member-set idle → propose delete.           |
-| `REROUTE_MARGIN`              | `db/category_events` | 0.08  | Min cosine gap to propose reroute.          |
-| `MAX_UNCAT_LLM_REVIEWS`       | `db/category_events` | 50    | Per-sweep cap on Uncat singleton reviews.   |
-| `_LLM_PARALLEL_WORKERS`       | `db/category_events` | 5     | Parallel LLM fan-out (below OPENAI_CONCURRENCY). |
-| `OPENAI_CONCURRENCY`          | `llm.py`             | 10    | Process-wide cap on in-flight OpenAI calls. |
-| `BATCH_TOKEN_BUDGET`          | `extractor.py`       | 2_000 | Approx tokens per LLM extraction batch.     |
-| `LLM_CONCURRENCY`             | `extractor.py`       | 40    | Parallel extraction batches.                |
+| Name                              | Where                    | Value | Purpose                                     |
+| --------------------------------- | ------------------------ | ----- | ------------------------------------------- |
+| `MERGE_COSINE_THRESHOLD`          | `db/embeddings.py`       | 0.60  | Promote link + sweep clustering.            |
+| `PENDING_MERGE_THRESHOLD`         | `db/embeddings.py`       | 0.65  | Pending-stage (observation-level) dedup.    |
+| `CATEGORY_COSINE_THRESHOLD`       | `db/embeddings.py`       | 0.35  | Below this → Uncategorized; also the Step 1b pre-filter floor. |
+| `ANCHOR_WEIGHT_SEED`              | `db/embeddings.py`       | 0.85  | Anchor share of blended category_vec for seed categories. |
+| `ANCHOR_WEIGHT_RUNTIME`           | `db/embeddings.py`       | 0.60  | Anchor share for LLM-minted runtime categories. |
+| `SIMILAR_CATEGORY_THRESHOLD`      | `db/category_retrieval`  | 0.60  | Hybrid-gate absorb threshold (dense cos).   |
+| `CROSS_PARENT_REPARENT_MIN_COS`   | `db/category_retrieval`  | 0.45  | Minimum dense cos before replant fires.     |
+| `CROSS_PARENT_REPARENT_MARGIN`    | `db/category_retrieval`  | 0.10  | Top-candidate must beat source's parent by this. |
+| `RRF_K`                           | `db/category_retrieval`  | 60    | Reciprocal Rank Fusion rank constant.       |
+| `RELEVANCE_HALF_LIFE_DAYS`        | `db/relevance.py`        | 14    | Recency decay.                              |
+| `MIN_SUB_CLUSTER_SIZE`            | `db/category_events`     | 3     | Min cluster size for a new category.        |
+| `MIN_CATEGORY_SIZE_FOR_SPLIT`     | `db/category_events`     | 10    | Won't split categories smaller than this.   |
+| `SPLIT_RECHECK_DELTA`             | `db/category_events`     | 10    | Growth needed before re-asking LLM to split.|
+| `MERGE_CATEGORY_THRESHOLD`        | `db/category_events`     | 0.80  | Sibling-merge threshold (non-root).         |
+| `MERGE_ROOT_CATEGORY_THRESHOLD`   | `db/category_events`     | 0.70  | Root-level merge threshold (looser).        |
+| `CATEGORY_STALE_DAYS`             | `db/category_events`     | 30    | Member-set idle → propose delete.           |
+| `REROUTE_MARGIN`                  | `db/category_events`     | 0.10  | Min cosine gap to propose reroute.          |
+| `MAX_UNCAT_LLM_REVIEWS`           | `db/category_events`     | None  | Per-sweep cap on Uncat singleton reviews (unbounded). |
+| `_LLM_PARALLEL_WORKERS`           | `db/category_events`     | 30    | Parallel LLM fan-out (below OPENAI_CONCURRENCY). |
+| `OPENAI_CONCURRENCY`              | `llm.py`                 | 10    | Process-wide cap on in-flight OpenAI calls. |
+| `BATCH_TOKEN_BUDGET`              | `extractor.py`           | 2_000 | Approx tokens per LLM extraction batch.     |
+| `LLM_CONCURRENCY`                 | `extractor.py`           | 40    | Parallel extraction batches.                |
 
 ---
 
 ## 10. Known quirks & gotchas
 
-- **Seed taxonomy coverage.** The seed in `taxonomy.yaml` is tech-heavy
-  (AI/ML, Creator & Content, Fintech, Productivity). With the relaxed
-  extraction prompt the scraper now emits dating / relationships /
-  social skills / fitness painpoints that have no seed home. Step 1b
-  (uncat LLM review) bootstraps new roots for those over time; if you
-  want faster coverage, extend `taxonomy.yaml` with consumer / dating /
-  health / lifestyle roots.
-- **Residual AI-sibling mis-routing.** Sub-categories of AI/ML
-  ("AI Coding Tools", "AI Agent Workflow", etc.) share a lot of
-  vocabulary in their anchors. A generic AI-business painpoint can
-  match several anchors at similar cosine and land in the wrong
-  sibling. Iterating sweeps doesn't help (the blend is 85% anchor, so
-  centroids barely move between passes). The real fix is enriching
-  anchors with exemplar titles; deferred.
+- **Seed taxonomy coverage.** The seed in `taxonomy.yaml` covers the
+  tech stack (AI/ML, Developer Tools, Cloud, Data, Security, Fintech,
+  Hardware) plus consumer / lifestyle roots (`Dating & Relationships`,
+  `Health & Lifestyle`, `App Business`, `Business & Sales`,
+  `Creator & Content`, `Productivity & Workflow`). The 3 consumer
+  roots were added after observing the extractor emitting painpoints
+  that had no seed home. If you add new roots or children, `seed_taxonomy`
+  is idempotent (INSERT OR IGNORE) so new yaml entries propagate into
+  existing DBs on the next `init_db()`. Run `python check_taxonomy.py`
+  (needs `OPENAI_API_KEY`) to verify no pair of anchors embeds >=
+  0.70 — failing pairs indicate descriptions that will routinely
+  steal painpoints from each other at routing time.
+- **Residual AI-sibling mis-routing is now mostly handled.** The
+  creation gate + cross-parent replant (`_decide_split_sub_fate`)
+  catches two of the three failure modes that used to cause this:
+  (a) split minting a sub that's a near-duplicate of a same-parent
+  sibling → absorbed; (b) split minting a sub whose content belongs
+  under a different root → replanted. The third mode (same-parent
+  siblings at cosine 0.55–0.75, below the 0.60 absorb threshold but
+  above the 0.80 sibling-merge threshold) is the only residual case
+  — the post-split sweep merge pass at 0.80 won't catch them and one
+  sweep doesn't leave time for iteration. Two-threshold fix (drop
+  sibling-merge to ~0.65 for same-parent pairs, drop root-merge to
+  ~0.60) collapses the remaining cases.
 - **OpenAI latency variability.** Live E2E runtimes have been observed
   to fluctuate 3× between otherwise identical runs (173 s → 775 s)
   purely from OpenAI-side latency. Zero retries in the log + same
@@ -470,6 +570,8 @@ it was "cascade from earlier merge" vs "apply error: foo".
 | Promoter loop                    | `promoter.py`                           |
 | Promote core                     | `db/painpoints.py`                      |
 | Embeddings, anchors, incremental centroid | `db/embeddings.py`             |
+| Hybrid (BM25 + dense) retrieval, FTS5 sync, creation gate thresholds | `db/category_retrieval.py` |
+| Taxonomy anchor-distinguishability check | `check_taxonomy.py`             |
 | Relevance                        | `db/relevance.py`                       |
 | Category worker driver           | `category_worker.py`                    |
 | Category events / proposers / appliers / tests | `db/category_events.py`   |
@@ -483,6 +585,7 @@ it was "cascade from earlier merge" vs "apply error: foo".
 | Hermetic pipeline test           | `tests/test_painpoint_pipeline.py`      |
 | Anchor tests                     | `tests/test_category_anchor.py`         |
 | Uncat LLM-review tests           | `tests/test_uncat_llm_review.py`        |
+| Creation-gate + replant tests    | `tests/test_creation_gate.py`           |
 | OpenAI shared utilities + semaphore | `llm.py` (`OPENAI_API_SEMAPHORE`, `llm_call`, `TokenCounter`) |
 
 ---
