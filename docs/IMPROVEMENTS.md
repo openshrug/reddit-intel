@@ -156,7 +156,7 @@ If we end up touching this layer, two adjacent improvements ride free:
 
 - **Surface budget pressure as a metric.** Log
   `tokens_used_in_window / tpm_limit` per call so we can plot it
-  against pipeline runtime. The `quality_eval` snapshot machinery
+  against pipeline runtime. The `evaluation/agentic_eval/` snapshot machinery
   already collects programmatic metrics — adding a "rate limit
   pressure" series there would let us validate Phase 2 the same way
   we validated Phase 1.

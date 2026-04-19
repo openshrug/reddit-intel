@@ -71,7 +71,7 @@ Write `report.md` **inside the run directory** (alongside `00_clean/`
 ```markdown
 # Pipeline quality report
 
-**Run dir**: `quality_eval/runs/<run name>/`
+**Run dir**: `evaluation/agentic_eval/runs/<run name>/`
 **Subreddits**: <list>
 **Timestamp**: <from the run dir name>
 

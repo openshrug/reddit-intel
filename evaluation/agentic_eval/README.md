@@ -15,7 +15,7 @@ utilities.
 ## Layout
 
 ```
-quality_eval/
+evaluation/agentic_eval/
     run_pipeline.py     # entry point: clean-DB run + snapshots
     snapshot.py         # checkpoint + copy trends.db, render dump + metrics
     inspect_db.py       # open_snapshot() ctx manager + 4 gap-filling helpers
@@ -42,6 +42,11 @@ quality_eval/
             report.md   # written by the evaluator agent (see below)
 ```
 
+The reports this harness produces feed directly into the sister
+`evaluation/painpoints_eval/` package, which lifts cited good/bad
+merges into quantitative gold-pair fixtures (see
+`evaluation/painpoints_eval/SEEDING.md`).
+
 Each invocation of `run_pipeline` allocates a fresh run directory whose
 name is the slugified subreddit list joined with the start timestamp
 (local time, second precision). Re-running the pipeline never
@@ -56,13 +61,13 @@ From the `reddit-intel/` repo root, with the project's venv activated
 and `OPENAI_API_KEY` set in `.env`:
 
 ```bash
-.venv/bin/python -m quality_eval.run_pipeline
+.venv/bin/python -m evaluation.agentic_eval.run_pipeline
 ```
 
 The default subreddit list is `openclaw, ClaudeAI, SideProject`. Override with:
 
 ```bash
-.venv/bin/python -m quality_eval.run_pipeline --subreddits foo bar baz
+.venv/bin/python -m evaluation.agentic_eval.run_pipeline --subreddits foo bar baz
 ```
 
 Other flags:
@@ -125,9 +130,9 @@ painpoint_merge) and the final taxonomy.
 
 ```python
 from pathlib import Path
-from quality_eval import inspect_db
+from evaluation.agentic_eval import inspect_db
 
-run = Path("quality_eval/runs/openclaw_claudeai_sideproject_20260419-101530")
+run = Path("evaluation/agentic_eval/runs/openclaw_claudeai_sideproject_20260419-101530")
 snap = run / "04_post_sweep" / "trends.db"
 with inspect_db.open_snapshot(snap):
     from db.queries import get_top_painpoints, get_painpoint_evidence
@@ -148,13 +153,13 @@ The four new helpers (`list_pending_painpoints_for_subreddit`,
 
 ## Handing the run off to an evaluator agent
 
-Once a run directory under `quality_eval/runs/` is populated:
+Once a run directory under `evaluation/agentic_eval/runs/` is populated:
 
 1. Open a fresh agent session (so it doesn't carry pipeline-debugging
    context).
-2. Point it at `quality_eval/instructions/00_protocol.md` and the
-   specific run directory (e.g.
-   `quality_eval/runs/openclaw_claudeai_sideproject_20260419-101530/`).
+2. Point it at `evaluation/agentic_eval/instructions/00_protocol.md`
+   and the specific run directory (e.g.
+   `evaluation/agentic_eval/runs/openclaw_claudeai_sideproject_20260419-101530/`).
 3. Ask it to follow the protocol and emit `report.md` *inside* that
    run directory, alongside the per-stage snapshots.
 

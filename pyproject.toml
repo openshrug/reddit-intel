@@ -80,7 +80,13 @@ py-modules = [
     "subriff_scraper",
     "mcp_server",
 ]
-packages = ["db", "painpoint_extraction"]
+packages = [
+    "db",
+    "painpoint_extraction",
+    "evaluation",
+    "evaluation.agentic_eval",
+    "evaluation.painpoints_eval",
+]
 
 [tool.ruff]
 line-length = 100

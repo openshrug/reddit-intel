@@ -2,8 +2,8 @@
 
 You are the parent **evaluator agent** for one pipeline run. The user
 will point you at one specific run directory under
-`quality_eval/runs/`, e.g.
-`quality_eval/runs/openclaw_claudeai_sideproject_20260419-101530/`.
+`evaluation/agentic_eval/runs/`, e.g.
+`evaluation/agentic_eval/runs/openclaw_claudeai_sideproject_20260419-101530/`.
 All paths in this folder are relative to that run directory; treat it
 as your working root.
 
@@ -19,7 +19,7 @@ the material you need is already on disk: each snapshot directory
 contains a `trends.db` SQLite file plus pre-rendered `dump.md` and
 `metrics.json`. Use `dump.md` for ready-to-cite examples and
 `metrics.json` for population-level numbers; drop into the SQLite file
-via the helpers in `quality_eval.inspect_db` when you need anything
+via the helpers in `evaluation.agentic_eval.inspect_db` when you need anything
 that isn't already rendered.
 
 ---
@@ -63,12 +63,12 @@ For each dimension `N` in `{1, 2, 3, 4}`, spawn a sub-agent and give
 it:
 
 - The **run directory** absolute path (e.g.
-  `/abs/path/.../quality_eval/runs/openclaw_..._20260419-101530/`).
+  `/abs/path/.../evaluation/agentic_eval/runs/openclaw_..._20260419-101530/`).
 - The corresponding **per-dimension file** to follow:
-  - dim 1 -> `quality_eval/instructions/10_extraction.md`
-  - dim 2 -> `quality_eval/instructions/20_pending_dedup.md`
-  - dim 3 -> `quality_eval/instructions/30_pending_merge.md`
-  - dim 4 -> `quality_eval/instructions/40_category.md`
+  - dim 1 -> `evaluation/agentic_eval/instructions/10_extraction.md`
+  - dim 2 -> `evaluation/agentic_eval/instructions/20_pending_dedup.md`
+  - dim 3 -> `evaluation/agentic_eval/instructions/30_pending_merge.md`
+  - dim 4 -> `evaluation/agentic_eval/instructions/40_category.md`
 - A pointer to **this file** (`00_protocol.md`) for the snapshot-
   inspection helper API, the threshold-lookup rule, and the hard
   rules.
@@ -124,7 +124,7 @@ and flag the redo in the final report's Recommendations section.
 ## 3. Inputs
 
 ```
-quality_eval/runs/<sub1>_<sub2>_..._<YYYYMMDD-HHMMSS>/   <- run dir
+evaluation/agentic_eval/runs/<sub1>_<sub2>_..._<YYYYMMDD-HHMMSS>/   <- run dir
     00_clean/         trends.db, dump.md, metrics.json   (clean DB)
     01_<sub1>/        ... after analyze(sub1)
     02_<sub2>/        ... after analyze(sub2)
@@ -146,9 +146,9 @@ From the `reddit-intel/` repo root:
 
 ```python
 from pathlib import Path
-from quality_eval import inspect_db
+from evaluation.agentic_eval import inspect_db
 
-run = Path("quality_eval/runs/openclaw_claudeai_sideproject_20260419-101530")
+run = Path("evaluation/agentic_eval/runs/openclaw_claudeai_sideproject_20260419-101530")
 snap = run / "03_sideproject" / "trends.db"
 
 with inspect_db.open_snapshot(snap):

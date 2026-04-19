@@ -1,10 +1,10 @@
 """Drive the full pipeline on a clean DB and snapshot every stage.
 
 Each invocation allocates its own run directory under
-``quality_eval/runs/`` whose name is ``<sub1>_<sub2>_..._<YYYYMMDD-HHMMSS>``
-(see ``snapshot.create_run_dir``). All per-stage snapshots and the
-evaluator's ``report.md`` live underneath that single directory so
-multiple runs never overwrite each other.
+``evaluation/agentic_eval/runs/`` whose name is
+``<sub1>_<sub2>_..._<YYYYMMDD-HHMMSS>`` (see ``snapshot.create_run_dir``).
+All per-stage snapshots and the evaluator's ``report.md`` live underneath
+that single directory so multiple runs never overwrite each other.
 
 Stages (matches the plan):
 
@@ -22,9 +22,9 @@ no pipeline work itself.
 
 Run::
 
-    python -m quality_eval.run_pipeline
-    python -m quality_eval.run_pipeline --subreddits foo bar
-    python -m quality_eval.run_pipeline --keep-existing-db
+    python -m evaluation.agentic_eval.run_pipeline
+    python -m evaluation.agentic_eval.run_pipeline --subreddits foo bar
+    python -m evaluation.agentic_eval.run_pipeline --keep-existing-db
 """
 
 import argparse

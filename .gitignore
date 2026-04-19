@@ -23,5 +23,6 @@ docs/_internal/
 report.md
 out.txt
 idea.txt
-quality_eval/snapshots/
-quality_eval/runs/
+evaluation/agentic_eval/snapshots/
+evaluation/agentic_eval/runs/
+evaluation/painpoints_eval/runs/

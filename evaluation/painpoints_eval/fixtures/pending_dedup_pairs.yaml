@@ -1,0 +1,109 @@
+# Gold pairs for PENDING_MERGE_THRESHOLD (extract-time pending dedup).
+#
+# Dim 2 in quality_eval/report.md scored 4/5 (pass) -- the dedup path
+# is mostly working. This fixture is intentionally small and exists for
+# regression coverage, not to drive a tuning sweep. Per ../SEEDING.md.
+#
+# Caveat on label sourcing: most of Dim 2's worked examples involve
+# (would-be-pending, existing-pending) collapses where the would-be
+# pending was never persisted (it became an extra `pending_painpoint_sources`
+# row). Those exact pairs are not recoverable from the snapshot. The
+# pairs below approximate Dim 2 by reusing pending pairs the report
+# explicitly discusses -- in the borderline failure-mode list and in
+# the tightest cost cluster -- and label them by the threshold's
+# expected behaviour.
+
+threshold_under_test: PENDING_MERGE_THRESHOLD
+
+pairs:
+  # =========================================================================
+  # POSITIVE -- pp #1 cluster pendings, all about API cost.
+  # These were eventually merged into painpoint #1 at promote time
+  # (cosine >= MERGE_COSINE_THRESHOLD = 0.60), so they're at minimum a
+  # smoke test that the stricter PENDING_MERGE_THRESHOLD = 0.65 also
+  # treats them as near-duplicates. Source: report.md Dim 3 pp #1
+  # (which lists them as a "tight semantic cluster").
+  # =========================================================================
+  - id: dedup-pp1-1-vs-287
+    a: "API cost barrier"
+    b: "High API costs for coding assistants"
+    label: positive
+    cite: runs/openclaw_claudeai_sideproject_20260419-101530/report.md#dim-2-pending-1
+    notes: "Tight cost-cluster duplicate; Dim 3 confirms they merged at promote time."
+
+  - id: dedup-pp1-1-vs-30
+    a: "API cost barrier"
+    b: "Costly external API tokens hinder usage"
+    label: positive
+    cite: runs/openclaw_claudeai_sideproject_20260419-101530/report.md#dim-2-pending-1
+
+  - id: dedup-pp1-30-vs-287
+    a: "Costly external API tokens hinder usage"
+    b: "High API costs for coding assistants"
+    label: positive
+    cite: runs/openclaw_claudeai_sideproject_20260419-101530/report.md#dim-2-pending-1
+
+  # =========================================================================
+  # POSITIVE -- pp #45 local-first cluster pendings. Same rationale.
+  # Source: report.md Dim 3 pp #45 ("Cleanly merged across 3 subreddits").
+  # =========================================================================
+  - id: dedup-pp45-48-vs-165
+    a: "Local-first AI architecture (privacy-focused)"
+    b: "Need reliable offline/local-first AI operation"
+    label: positive
+    cite: runs/openclaw_claudeai_sideproject_20260419-101530/report.md#dim-2-pending-48
+    notes: "Cross-subreddit dedup smoke test -- both about run-AI-locally."
+
+  - id: dedup-pp45-219-vs-225
+    a: "Need for lightweight, self-hosted models on edge"
+    b: "Privacy concerns with free cloud tiers"
+    label: positive
+    cite: runs/openclaw_claudeai_sideproject_20260419-101530/report.md#dim-2-pending-48
+
+  # =========================================================================
+  # NEGATIVE -- borderline failure mode #2 from Dim 2:
+  # "legal-disclosure vs screenshot privacy" + "cost-allocation vs
+  # cost-shock". The report flags these as cases where 0.65 catches
+  # them but probably shouldn't (vocabulary dominates intent).
+  # =========================================================================
+  - id: dedup-neg-pp122-142-vs-143
+    a: "Security/governance risk for law firms using OpenClaw"
+    b: "Cost/feasibility of AI API usage at scale"
+    label: negative
+    cite: runs/openclaw_claudeai_sideproject_20260419-101530/report.md#dim-2-pending-143
+    notes: "Same r/openclaw 'law firm' thread, different pains -- borderline failure mode #2 (Dim 2)."
+
+  - id: dedup-neg-pp56-65-vs-434
+    a: "Security imperatives in prompts"
+    b: "Risk of exposing secrets in screenshots"
+    label: negative
+    cite: runs/openclaw_claudeai_sideproject_20260419-101530/report.md#dim-2-pending-65
+    notes: "Shared 'secrets' vocabulary, distinct contexts -- borderline failure mode #2 (Dim 2)."
+
+  # =========================================================================
+  # NEGATIVE -- pp #48 mega-merge components used as Dim 2 worst-case
+  # regression. If PENDING_MERGE_THRESHOLD ever slips below the cosine
+  # of these clearly-distinct pairs we'd start collapsing them at
+  # extract time, which would be strictly worse than today's behaviour
+  # (where they at least make it to the painpoint stage as separate
+  # pendings). Source: same as Dim 3 pp #48 mega-merge entries.
+  # =========================================================================
+  - id: dedup-neg-pp48-52-vs-62
+    a: "Tool unreliable for production"
+    b: "Harsh hardware requirements for reliability"
+    label: negative
+    cite: runs/openclaw_claudeai_sideproject_20260419-101530/report.md#dim-2-pending-52
+    notes: "Cross-coverage with Dim 3 pp #48 mega-merge negative; software vs. hardware."
+
+  - id: dedup-neg-pp48-52-vs-264
+    a: "Tool unreliable for production"
+    b: "OpenClaw becoming unagentic"
+    label: negative
+    cite: runs/openclaw_claudeai_sideproject_20260419-101530/report.md#dim-2-pending-52
+
+  - id: dedup-neg-pp81-43-vs-91
+    a: "No-code UX for non-techs"
+    b: "No-code barrier to app building"
+    label: negative
+    cite: runs/openclaw_claudeai_sideproject_20260419-101530/report.md#dim-2-pending-43
+    notes: "Polarity flip from Dim 3 pp #81; vocabulary-similar but opposite sentiment."

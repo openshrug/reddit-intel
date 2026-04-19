@@ -1,0 +1,214 @@
+# Gold pairs for MERGE_COSINE_THRESHOLD (pending -> painpoint merge).
+#
+# Seeded from quality_eval/report.md Dim 3 examples per the protocol in
+# ../SEEDING.md. Every pair carries `cite:` pointing at the run + section
+# of the report that supplied it.
+#
+# Run id `openclaw_claudeai_sideproject_20260419-101530` follows the
+# layout produced by `evaluation/agentic_eval/snapshot.create_run_dir`;
+# the live report.md actually lives at
+# `evaluation/agentic_eval/snapshots/openclaw_claudeai_sideproject/report.md`
+# (legacy path predating the runs/ refactor). The cite anchors are
+# stable shorthand, not literal HTML anchors.
+#
+# Title strings were lifted verbatim from
+# `04_post_sweep/trends.db` via `inspect_db.open_snapshot()` -- not
+# paraphrased, so the embedder sees what the live pipeline saw.
+
+threshold_under_test: MERGE_COSINE_THRESHOLD
+
+pairs:
+  # =========================================================================
+  # POSITIVE -- pp #45 cluster (Local-first AI architecture, sig=8, 4 pendings)
+  # report.md: "Painpoint #45 (`04_post_sweep`, good)" -- Cleanly merged
+  # across 3 subreddits.
+  # =========================================================================
+  - id: pp45-positive-48-vs-165
+    a: "Local-first AI architecture (privacy-focused)"
+    b: "Need reliable offline/local-first AI operation"
+    label: positive
+    cite: runs/openclaw_claudeai_sideproject_20260419-101530/report.md#dim-3-pp-45
+    notes: "Both members of the pp #45 'run AI locally for privacy' cluster."
+
+  - id: pp45-positive-48-vs-219
+    a: "Local-first AI architecture (privacy-focused)"
+    b: "Need for lightweight, self-hosted models on edge"
+    label: positive
+    cite: runs/openclaw_claudeai_sideproject_20260419-101530/report.md#dim-3-pp-45
+
+  - id: pp45-positive-48-vs-225
+    a: "Local-first AI architecture (privacy-focused)"
+    b: "Privacy concerns with free cloud tiers"
+    label: positive
+    cite: runs/openclaw_claudeai_sideproject_20260419-101530/report.md#dim-3-pp-45
+
+  - id: pp45-positive-165-vs-219
+    a: "Need reliable offline/local-first AI operation"
+    b: "Need for lightweight, self-hosted models on edge"
+    label: positive
+    cite: runs/openclaw_claudeai_sideproject_20260419-101530/report.md#dim-3-pp-45
+
+  - id: pp45-positive-165-vs-225
+    a: "Need reliable offline/local-first AI operation"
+    b: "Privacy concerns with free cloud tiers"
+    label: positive
+    cite: runs/openclaw_claudeai_sideproject_20260419-101530/report.md#dim-3-pp-45
+
+  - id: pp45-positive-219-vs-225
+    a: "Need for lightweight, self-hosted models on edge"
+    b: "Privacy concerns with free cloud tiers"
+    label: positive
+    cite: runs/openclaw_claudeai_sideproject_20260419-101530/report.md#dim-3-pp-45
+
+  # =========================================================================
+  # POSITIVE -- pp #1 cluster (API cost barrier, sig=5, 4 pendings)
+  # report.md: "Painpoint #1 (`01_openclaw`, good)" -- Tight semantic
+  # cluster, all about API costs being prohibitive.
+  # =========================================================================
+  - id: pp1-positive-1-vs-30
+    a: "API cost barrier"
+    b: "Costly external API tokens hinder usage"
+    label: positive
+    cite: runs/openclaw_claudeai_sideproject_20260419-101530/report.md#dim-3-pp-1
+
+  - id: pp1-positive-1-vs-47
+    a: "API cost barrier"
+    b: "Cost visibility and API-key management"
+    label: positive
+    cite: runs/openclaw_claudeai_sideproject_20260419-101530/report.md#dim-3-pp-1
+
+  - id: pp1-positive-1-vs-287
+    a: "API cost barrier"
+    b: "High API costs for coding assistants"
+    label: positive
+    cite: runs/openclaw_claudeai_sideproject_20260419-101530/report.md#dim-3-pp-1
+
+  - id: pp1-positive-30-vs-47
+    a: "Costly external API tokens hinder usage"
+    b: "Cost visibility and API-key management"
+    label: positive
+    cite: runs/openclaw_claudeai_sideproject_20260419-101530/report.md#dim-3-pp-1
+
+  - id: pp1-positive-30-vs-287
+    a: "Costly external API tokens hinder usage"
+    b: "High API costs for coding assistants"
+    label: positive
+    cite: runs/openclaw_claudeai_sideproject_20260419-101530/report.md#dim-3-pp-1
+
+  - id: pp1-positive-47-vs-287
+    a: "Cost visibility and API-key management"
+    b: "High API costs for coding assistants"
+    label: positive
+    cite: runs/openclaw_claudeai_sideproject_20260419-101530/report.md#dim-3-pp-1
+
+  # =========================================================================
+  # NEGATIVE -- pp #48 mega-merge (sig=20). FIVE distinct OpenClaw pains
+  # collapsed onto one painpoint titled "Tool unreliable for production".
+  # report.md: "Painpoint #48 (`04_post_sweep`, BAD: mega-merge)" -- the
+  # single biggest merge defect in the corpus. 5 components -> 10 cross-
+  # pairs, all labelled negative.
+  # =========================================================================
+  - id: pp48-megamerge-52-vs-55
+    a: "Tool unreliable for production"
+    b: "Need better local memory management & automation"
+    label: negative
+    cite: runs/openclaw_claudeai_sideproject_20260419-101530/report.md#dim-3-pp-48
+    notes: "General unreliability vs. framework misunderstanding (memory/automation framing)."
+
+  - id: pp48-megamerge-52-vs-60
+    a: "Tool unreliable for production"
+    b: "Complex OpenClaw setup"
+    label: negative
+    cite: runs/openclaw_claudeai_sideproject_20260419-101530/report.md#dim-3-pp-48
+    notes: "General unreliability vs. setup complexity -- distinct pains."
+
+  - id: pp48-megamerge-52-vs-62
+    a: "Tool unreliable for production"
+    b: "Harsh hardware requirements for reliability"
+    label: negative
+    cite: runs/openclaw_claudeai_sideproject_20260419-101530/report.md#dim-3-pp-48
+    notes: "Software unreliability vs. hardware requirements."
+
+  - id: pp48-megamerge-52-vs-264
+    a: "Tool unreliable for production"
+    b: "OpenClaw becoming unagentic"
+    label: negative
+    cite: runs/openclaw_claudeai_sideproject_20260419-101530/report.md#dim-3-pp-48
+    notes: "General unreliability vs. specific agentic regression."
+
+  - id: pp48-megamerge-55-vs-60
+    a: "Need better local memory management & automation"
+    b: "Complex OpenClaw setup"
+    label: negative
+    cite: runs/openclaw_claudeai_sideproject_20260419-101530/report.md#dim-3-pp-48
+
+  - id: pp48-megamerge-55-vs-62
+    a: "Need better local memory management & automation"
+    b: "Harsh hardware requirements for reliability"
+    label: negative
+    cite: runs/openclaw_claudeai_sideproject_20260419-101530/report.md#dim-3-pp-48
+
+  - id: pp48-megamerge-55-vs-264
+    a: "Need better local memory management & automation"
+    b: "OpenClaw becoming unagentic"
+    label: negative
+    cite: runs/openclaw_claudeai_sideproject_20260419-101530/report.md#dim-3-pp-48
+
+  - id: pp48-megamerge-60-vs-62
+    a: "Complex OpenClaw setup"
+    b: "Harsh hardware requirements for reliability"
+    label: negative
+    cite: runs/openclaw_claudeai_sideproject_20260419-101530/report.md#dim-3-pp-48
+
+  - id: pp48-megamerge-60-vs-264
+    a: "Complex OpenClaw setup"
+    b: "OpenClaw becoming unagentic"
+    label: negative
+    cite: runs/openclaw_claudeai_sideproject_20260419-101530/report.md#dim-3-pp-48
+
+  - id: pp48-megamerge-62-vs-264
+    a: "Harsh hardware requirements for reliability"
+    b: "OpenClaw becoming unagentic"
+    label: negative
+    cite: runs/openclaw_claudeai_sideproject_20260419-101530/report.md#dim-3-pp-48
+
+  # =========================================================================
+  # NEGATIVE -- pp #81 polarity flip
+  # report.md: "Painpoint #81 (`04_post_sweep`, mixed: polarity flip)"
+  # pp #43 is positive sentiment ("just works"), pp #91 is negative
+  # ("you still have to learn to code"). Same vocabulary, opposite
+  # experience.
+  # =========================================================================
+  - id: pp81-polarity-43-vs-91
+    a: "No-code UX for non-techs"
+    b: "No-code barrier to app building"
+    label: negative
+    cite: runs/openclaw_claudeai_sideproject_20260419-101530/report.md#dim-3-pp-81
+    notes: "Polarity flip: 'works for non-techs' vs. 'still need to code'."
+
+  # =========================================================================
+  # NEGATIVE -- pp #56 context collision
+  # report.md: "Painpoint #56 (`04_post_sweep`, mixed)" -- AI-prompt
+  # guardrails (pp #65) merged with screenshot privacy (pp #434). Both
+  # contain "secrets" but the contexts are distinct.
+  # =========================================================================
+  - id: pp56-context-65-vs-434
+    a: "Security imperatives in prompts"
+    b: "Risk of exposing secrets in screenshots"
+    label: negative
+    cite: runs/openclaw_claudeai_sideproject_20260419-101530/report.md#dim-3-pp-56
+    notes: "AI-guardrails pain vs. screenshot privacy demo -- shared 'secrets' vocabulary, distinct contexts."
+
+  # =========================================================================
+  # NEGATIVE -- pp #122 cost-vs-governance (co-occurrence drift)
+  # report.md: "Painpoint #122 (`01_openclaw`, good)" with caveat --
+  # pp #143 (cost question) wrongly bundled into the security/governance
+  # painpoint because both came from the same r/openclaw "law firm"
+  # thread. Embedding co-occurrence drift.
+  # =========================================================================
+  - id: pp122-cost-142-vs-143
+    a: "Security/governance risk for law firms using OpenClaw"
+    b: "Cost/feasibility of AI API usage at scale"
+    label: negative
+    cite: runs/openclaw_claudeai_sideproject_20260419-101530/report.md#dim-3-pp-122
+    notes: "Same thread, different pains -- security/governance vs. budget allocation."

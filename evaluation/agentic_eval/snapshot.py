@@ -1,6 +1,6 @@
 """Snapshot the live ``trends.db`` after a pipeline stage.
 
-Every invocation of ``quality_eval.run_pipeline`` allocates its own
+Every invocation of ``evaluation.agentic_eval.run_pipeline`` allocates its own
 *run directory* under ``runs/`` whose name is the slugified subreddit
 list joined with an ``YYYYMMDD-HHMMSS`` timestamp -- e.g.
 ``runs/openclaw_claudeai_sideproject_20260419-101530/``. Per-stage

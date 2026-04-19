@@ -517,6 +517,20 @@ it was "cascade from earlier merge" vs "apply error: foo".
 | `BATCH_TOKEN_BUDGET`              | `extractor.py`           | 2_000 | Approx tokens per LLM extraction batch.     |
 | `LLM_CONCURRENCY`                 | `extractor.py`           | 40    | Parallel extraction batches.                |
 
+> **Re-deriving `MERGE_COSINE_THRESHOLD` / `PENDING_MERGE_THRESHOLD`.**
+> The canonical way to retune these two pairwise-cosine thresholds is
+> `evaluation/painpoints_eval/` — a quantitative harness whose gold
+> pairs are lifted from `evaluation/agentic_eval/` `report.md`
+> failures (see `evaluation/painpoints_eval/SEEDING.md`). Run
+> `python -m evaluation.painpoints_eval.threshold_sweep --fixture
+> evaluation/painpoints_eval/fixtures/painpoint_merge_pairs.yaml`
+> to plot P/R/F1 over `[0.55, 0.80]`, and
+> `python -m evaluation.painpoints_eval.mega_merge_stress
+> --snapshot <…>/04_post_sweep/trends.db` to see which threshold
+> splits a documented mega-merge (default: `pp #48`). Update the
+> values in `db/embeddings.py` only when the harness shows the new
+> threshold strictly dominates the old one on every gold pair.
+
 ---
 
 ## 10. Known quirks & gotchas
