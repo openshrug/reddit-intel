@@ -49,12 +49,13 @@ do.
 ## 2. Execution model: fan out to one sub-agent per dimension
 
 The four dimensions are independent (no shared judgment state), so
-**dispatch one sub-agent per dimension in parallel**, then synthesize
-their outputs yourself. This keeps contexts clean (a dim-4 sub-agent
-isn't biased by 25 noisy pendings it just read for dim 1) and cuts
-wall-clock roughly 4×. Single-agent sequential evaluation is supported
-as a fallback (just read the per-dim files yourself in order), but
-parallel sub-agents are the default.
+**dispatch one sub-agent per dimension and run them in parallel if
+your agent harness supports parallel sub-agent dispatch**. This keeps
+contexts clean (a dim-4 sub-agent isn't biased by 25 noisy pendings
+it just read for dim 1) and cuts wall-clock roughly 4×. If your
+harness doesn't support sub-agents at all, fall back to single-agent
+sequential evaluation: read the per-dim files yourself in dimension
+order. Either mode produces the same final report.
 
 ### Dispatch contract
 
@@ -72,13 +73,16 @@ it:
   inspection helper API, the threshold-lookup rule, and the hard
   rules.
 
-Use Cursor's `Task` tool with `subagent_type="generalPurpose"` (the
-sub-agent needs to read code, run Python helpers against the snapshot
-DB, and grep for live constant values, so read-only mode is too
-restrictive).
+The sub-agent must be able to read code, execute Python helpers
+against the snapshot DB, and grep for live constant values -- so a
+read-only or pure-text sub-agent profile is too restrictive. Pick
+whichever sub-agent type your harness exposes that has those
+capabilities.
 
-**Fan out all four in a single tool-call batch.** Do not await one
-sub-agent before dispatching the next.
+**Dispatch all four sub-agents in parallel using whatever parallel
+sub-agent primitive your harness exposes** (typically: emitting
+multiple sub-agent tool calls in a single assistant message). Do not
+await one sub-agent before dispatching the next.
 
 ### Sub-agent return contract
 
