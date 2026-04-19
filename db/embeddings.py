@@ -43,13 +43,31 @@ CATEGORY_COSINE_THRESHOLD = 0.35  # below this for ALL categories -> Uncategoriz
 # the overly-tight 0.45 that sent 64% of painpoints to Uncategorized
 # in the live run.
 
-# Category vector = ANCHOR_WEIGHT · anchor(name+desc) + (1-ANCHOR_WEIGHT) · mean(members).
-# 0.85 (up from 0.7) tightens the anchor's authority after observing
-# residual mis-routing: under 0.7 the 30% member contribution still
-# let an "AI Coding Tools" bucket creep toward general AI-business
-# painpoints. 0.15 member share keeps the blend responsive to
-# well-routed members without letting drift take over.
-ANCHOR_WEIGHT = 0.85
+# Category vector = weight · anchor(name+desc) + (1-weight) · mean(members).
+#
+# Two regimes, picked per-category by `categories.is_seed`:
+#
+# - SEED categories (taxonomy.yaml entries + Uncategorized) have
+#   human-curated name/description text. The anchor IS the declared
+#   intent, so we trust it heavily — 0.15 member share is enough to
+#   bend the blend toward evidence without letting a single off-topic
+#   member drag the centroid. Raised from 0.7 to 0.85 after observing
+#   that 30% member share still let "AI Coding Tools" creep toward
+#   general AI-business painpoints under 0.7.
+#
+# - RUNTIME-MINTED categories have LLM-synthesized descriptions whose
+#   keyword-richness varies. The anchor is less trustworthy, so we
+#   split weight more evenly — 0.60 anchor / 0.40 member mean. The
+#   members are what actually decided the category existed, so giving
+#   them a stronger say corrects for a weak anchor without flipping to
+#   pure-mean (which would bring back the hijacking that the anchor
+#   was introduced to fix).
+ANCHOR_WEIGHT_SEED = 0.85
+ANCHOR_WEIGHT_RUNTIME = 0.60
+# Backwards-compat alias: older callers / tests still reference
+# ANCHOR_WEIGHT as a single module constant. Kept pointing at the seed
+# value since that was the pre-split behavior for everything.
+ANCHOR_WEIGHT = ANCHOR_WEIGHT_SEED
 
 
 # ---------------------------------------------------------------------------
@@ -792,8 +810,13 @@ def update_category_embedding(conn, category_id, embedder=None):
         return
 
     if anchor is not None and mean is not None:
+        seed_row = conn.execute(
+            "SELECT is_seed FROM categories WHERE id = ?", (category_id,),
+        ).fetchone()
+        is_seed = bool(seed_row["is_seed"]) if seed_row is not None else False
+        weight = ANCHOR_WEIGHT_SEED if is_seed else ANCHOR_WEIGHT_RUNTIME
         blended = [
-            ANCHOR_WEIGHT * anchor[i] + (1.0 - ANCHOR_WEIGHT) * mean[i]
+            weight * anchor[i] + (1.0 - weight) * mean[i]
             for i in range(EMBEDDING_DIM)
         ]
         _normalize(blended)

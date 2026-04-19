@@ -26,7 +26,18 @@ from .category_clustering import (
     cluster_painpoints,
     inter_category_similarity,
 )
+from .category_retrieval import (
+    CROSS_PARENT_REPARENT_MARGIN,
+    CROSS_PARENT_REPARENT_MIN_COS,
+    SIMILAR_CATEGORY_THRESHOLD,
+    category_dense_cos,
+    delete_category_fts,
+    find_hybrid_candidates,
+    find_similar_category,
+    sync_category_fts,
+)
 from .embeddings import (
+    CATEGORY_COSINE_THRESHOLD,
     MERGE_COSINE_THRESHOLD,
     add_member_to_centroid,
     delete_category_anchor,
@@ -241,12 +252,50 @@ def propose_uncategorized_singleton_events(
     if not singletons:
         return
 
+    # Pre-filter: painpoints whose nearest existing non-Uncat category is
+    # already above CATEGORY_COSINE_THRESHOLD would have been routed there
+    # at creation time if that category had existed — now that the
+    # taxonomy has grown (seed additions, prior sweeps), the reroute step
+    # will pull them into the right bucket without needing an LLM
+    # opinion. Skipping them slashes the per-sweep LLM bill (was the
+    # dominant cost: 170+ create-decisions in one run) and kills the
+    # "LLM mints a new category whose anchor is a 0.6 cousin of an
+    # existing one" feedback loop — the exact source of root sprawl.
+    #
+    # Singletons with cosine < CATEGORY_COSINE_THRESHOLD to the best
+    # category are genuinely homeless: reroute cannot help (it would
+    # match Uncategorized-or-nothing), so an LLM opinion is the only way
+    # they ever leave the bucket. Those are the ones we review.
+    homeless = []
+    nearest_hints = {}
+    for m in singletons:
+        emb = get_painpoint_embedding(conn, m["id"])
+        if emb is None:
+            homeless.append(m)  # no vec row — treat as homeless
+            continue
+        ranked = find_best_category_ranked(conn, emb, limit=1)
+        if not ranked:
+            homeless.append(m)
+            continue
+        best_id, best_cos = ranked[0]
+        if best_cos >= CATEGORY_COSINE_THRESHOLD:
+            continue  # reroute will handle this one
+        homeless.append(m)
+        name_row = conn.execute(
+            "SELECT name FROM categories WHERE id = ?", (best_id,),
+        ).fetchone()
+        if name_row is not None:
+            nearest_hints[m["id"]] = (name_row["name"], best_cos)
+
+    if not homeless:
+        return
+
     # Prioritise by signal * severity. Null severity defaults to 5
     # (historical data; shouldn't happen with the hardened save path).
     def _priority(m):
         return (m["signal_count"] or 1) * (m["severity"] or 5)
-    singletons.sort(key=_priority, reverse=True)
-    batch = singletons if max_reviews is None else singletons[:max_reviews]
+    homeless.sort(key=_priority, reverse=True)
+    batch = homeless if max_reviews is None else homeless[:max_reviews]
 
     _roots, flat = _get_taxonomy_for_llm(conn)
 
@@ -259,6 +308,7 @@ def propose_uncategorized_singleton_events(
                 m["title"], m["description"] or "",
                 m["signal_count"] or 1, m["severity"] or 5,
                 flat,
+                nearest_hint=nearest_hints.get(m["id"]),
             )),
         )
         for m in batch
@@ -932,12 +982,12 @@ def propose_reroute_events(conn, embedder=None):
         if not members:
             continue
 
-        # Per-painpoint skip state: pull last_updated + reroute_checked_at
-        # in one batch keyed by id.
+        # Per-painpoint skip state + text (title + description) for the
+        # BM25 side of hybrid retrieval. One batch query keyed by id.
         pp_ids = [pp_id for pp_id, _ in members]
         placeholders = in_clause_placeholders(len(pp_ids))
         meta_rows = conn.execute(
-            f"SELECT id, last_updated, reroute_checked_at "
+            f"SELECT id, title, description, last_updated, reroute_checked_at "
             f"FROM painpoints WHERE id IN ({placeholders})",
             pp_ids,
         ).fetchall()
@@ -961,15 +1011,24 @@ def propose_reroute_events(conn, embedder=None):
                 loo_sim = leave_one_out_centroid_sim(members, pp_id, emb)
                 current_sim = 0.0 if loo_sim is None else loo_sim
 
-            ranked = find_best_category_ranked(conn, emb, limit=50)
-            best_other_id = None
-            best_other_sim = -1.0
-            for cat_id, sim in ranked:
-                if cat_id == current_cat or cat_id == uncat_id:
-                    continue
-                if sim > best_other_sim:
-                    best_other_id = cat_id
-                    best_other_sim = sim
+            # Hybrid retrieval: BM25 (on the painpoint's title +
+            # description against category_fts) + dense cosine, fused
+            # via RRF. Picks the top-RRF candidate whose dense cosine
+            # we then use for the margin test — RRF gives us recall
+            # (surfacing keyword-matching categories the dense top-K
+            # missed), dense cos stays the accept metric so the
+            # REROUTE_MARGIN=0.10 threshold keeps its semantic meaning.
+            title = row["title"] if row is not None else ""
+            desc = row["description"] if row is not None else ""
+            query_text = f"{title or ''} {desc or ''}".strip()
+            fused = find_hybrid_candidates(
+                conn, emb, query_text,
+                exclude_ids={current_cat},  # uncat excluded by the primitive
+            )
+            if fused:
+                best_other_id, best_other_sim, _rrf = fused[0]
+            else:
+                best_other_id, best_other_sim = None, -1.0
 
             checked_this_pass.append(pp_id)
 
@@ -1222,7 +1281,9 @@ def _upsert_category_by_name(conn, name, description, parent_id):
         "VALUES (?, ?, ?, ?)",
         (name, parent_id, description, _now()),
     )
-    return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    new_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    sync_category_fts(conn, new_id, name, description)
+    return new_id
 
 
 def _drop_category_vec_state(conn, category_id):
@@ -1244,6 +1305,7 @@ def _drop_category_vec_state(conn, category_id):
             category_id, exc,
         )
     delete_category_anchor(conn, category_id)
+    delete_category_fts(conn, category_id)
 
 
 def _resolve_parent_id(conn, parent_name):
@@ -1278,6 +1340,102 @@ def _resolve_parent_id(conn, parent_name):
     return None
 
 
+def _route_pps_to_category(conn, pp_ids, target_id):
+    """Move pp_ids into target_id, updating centroid state + category_vec.
+    Shared by the creation gate and the split-absorb path."""
+    prev_rows = _current_category_for(conn, pp_ids)
+    now = _now()
+    for pp_id in pp_ids:
+        conn.execute(
+            "UPDATE painpoints SET category_id = ?, last_updated = ? WHERE id = ?",
+            (target_id, now, pp_id),
+        )
+    _apply_member_move_delta(conn, pp_ids, prev_rows, target_id)
+    update_category_embedding(conn, target_id)
+
+
+def _maybe_route_to_similar(conn, name, description, pp_ids, embedder):
+    """Creation gate. If an existing category is >= SIMILAR_CATEGORY_THRESHOLD
+    dense-cosine to the proposed (name, description), move `pp_ids`
+    into it and return that category's id. Otherwise return None — the
+    caller mints a new category.
+
+    Returns None if `embedder` is None (hermetic test path without
+    embedding capability) so tests that don't exercise the gate keep
+    their old behavior. Production always passes an embedder.
+    """
+    if embedder is None:
+        return None
+    candidates = find_similar_category(conn, name, description, embedder)
+    if not candidates:
+        return None
+    top_id, top_cos, _rrf = candidates[0]
+    if top_cos < SIMILAR_CATEGORY_THRESHOLD:
+        return None
+    _route_pps_to_category(conn, pp_ids, top_id)
+    return top_id
+
+
+def _decide_split_sub_fate(
+    conn, name, description, embedder, default_parent_id,
+):
+    """Decide how to handle a proposed split sub-category.
+
+    Returns one of:
+      - ("absorb", existing_cat_id)  — gate fired, route pp_ids there
+      - ("replant", better_parent_id) — new sub under a different root
+      - ("create", default_parent_id) — new sub under source's parent
+
+    The cross-parent replant path catches cases where split carved out
+    a cluster that semantically belongs under a different root than
+    the split source's. Example from the live E2E: an AI/ML source was
+    split into a sub about "content strategy and market perception";
+    those 8 painpoints are really an App Business / marketing topic
+    that got trapped under AI/ML because split inherits parent blindly.
+
+    Sharing ONE `embedder.embed()` call across all three decisions
+    keeps the per-sub cost to one HTTP round-trip.
+    """
+    if embedder is None:
+        return "create", default_parent_id
+    text = f"{name or ''} {description or ''}".strip()
+    if not text:
+        return "create", default_parent_id
+
+    embedding = embedder.embed(text)
+    fused = find_hybrid_candidates(conn, embedding, text)
+    if not fused:
+        return "create", default_parent_id
+
+    top_id, top_cos, _rrf = fused[0]
+
+    # Gate: near-duplicate → absorb.
+    if top_cos >= SIMILAR_CATEGORY_THRESHOLD:
+        return "absorb", top_id
+
+    # Replant: does the top candidate live under a different root than
+    # the split source, with a decisively better fit?
+    if top_cos < CROSS_PARENT_REPARENT_MIN_COS:
+        return "create", default_parent_id
+    default_cos = category_dense_cos(conn, embedding, default_parent_id)
+    if top_cos - default_cos < CROSS_PARENT_REPARENT_MARGIN:
+        return "create", default_parent_id
+
+    # Find the top candidate's root. If it IS a root, use it as the
+    # new parent; if it's a child, use its parent so new-sub stays at
+    # depth-2 (no depth-3 sub-of-sub categories in this taxonomy).
+    row = conn.execute(
+        "SELECT id, parent_id FROM categories WHERE id = ?", (top_id,),
+    ).fetchone()
+    if row is None:
+        return "create", default_parent_id
+    better_parent = row["parent_id"] if row["parent_id"] is not None else row["id"]
+    if better_parent == default_parent_id:
+        # Top candidate is already under the default parent — no replant.
+        return "create", default_parent_id
+    return "replant", better_parent
+
+
 def _apply_add_category_new(conn, event, namer, embedder=None):
     # Use pre-fetched LLM response if available (from prefetch_llm_for_event
     # called concurrently before we entered the savepoint). Falls back to
@@ -1296,15 +1454,29 @@ def _apply_add_category_new(conn, event, namer, embedder=None):
         raise RuntimeError("LLM returned empty category name")
 
     parent_id = _resolve_parent_id(conn, parent_name)
-    target_id = _upsert_category_by_name(conn, name, description, parent_id)
-
-    # Anchor the category to its declared identity before members land,
-    # so update_category_embedding can blend rather than drift with the
-    # first few arrivals.
-    if embedder is not None:
-        store_category_anchor(conn, target_id, name, description, embedder)
-
     moved_ids = event.payload["painpoint_ids"]
+
+    # Creation gate: if a category already exists that's semantically
+    # close to the proposed one, route the would-be members to it
+    # instead of minting a near-duplicate. See db/category_retrieval.py
+    # for the fusion logic; threshold tuned from the E2E sibling-cosine
+    # probe (distinct-sibling max 0.53, duplicate floor 0.60).
+    target_id = _maybe_route_to_similar(
+        conn, name, description, moved_ids, embedder,
+    )
+    if target_id is None:
+        target_id = _upsert_category_by_name(conn, name, description, parent_id)
+        # Anchor the category to its declared identity before members land,
+        # so update_category_embedding can blend rather than drift with the
+        # first few arrivals.
+        if embedder is not None:
+            store_category_anchor(conn, target_id, name, description, embedder)
+    else:
+        log.info(
+            "add_category_new: '%s' collapsed into existing cat_id=%s "
+            "at >= SIMILAR_CATEGORY_THRESHOLD — routing %d members",
+            name, target_id, len(moved_ids),
+        )
     # Track previous categories so we can decrement their cached sums.
     prev_rows = _current_category_for(conn, moved_ids)
     for pp_id in moved_ids:
@@ -1335,7 +1507,33 @@ def _apply_add_category_split(conn, event, namer, embedder=None):
         if not name or not pp_ids:
             continue
 
-        sub_id = _upsert_category_by_name(conn, name, description, parent_id)
+        # One hybrid retrieval call decides all three outcomes:
+        # - absorb: near-duplicate exists → route pp_ids to it.
+        # - replant: the proposed sub semantically belongs under a
+        #   DIFFERENT root than the split source's parent. Create
+        #   the sub there instead of inheriting the wrong parent.
+        # - create: no close match and source's parent is still the
+        #   best fit → mint the sub under the default parent.
+        action, target = _decide_split_sub_fate(
+            conn, name, description, embedder, default_parent_id=parent_id,
+        )
+        if action == "absorb":
+            log.info(
+                "add_category_split: sub '%s' collapsed into existing "
+                "cat_id=%s at >= SIMILAR_CATEGORY_THRESHOLD — routing "
+                "%d members", name, target, len(pp_ids),
+            )
+            _route_pps_to_category(conn, pp_ids, target)
+            continue
+        sub_parent_id = target
+        if action == "replant":
+            log.info(
+                "add_category_split: sub '%s' replanted from default "
+                "parent=%s to parent=%s based on hybrid-global match",
+                name, parent_id, target,
+            )
+
+        sub_id = _upsert_category_by_name(conn, name, description, sub_parent_id)
         new_cat_ids.append(sub_id)
 
         if embedder is not None:
@@ -1479,6 +1677,9 @@ def _apply_merge_categories(conn, event, namer, embedder=None):
         # Description changed → re-anchor to match the new text.
         if embedder is not None:
             store_category_anchor(conn, survivor_id, survivor_name, new_desc, embedder)
+        # Keep BM25 index in lock-step with the new description so the
+        # next creation-gate lookup sees the survivor's expanded scope.
+        sync_category_fts(conn, survivor_id, survivor_name, new_desc)
 
     # Update the survivor's embedding with the new description
     update_category_embedding(conn, survivor_id)

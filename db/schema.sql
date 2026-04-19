@@ -145,3 +145,13 @@ CREATE INDEX IF NOT EXISTS idx_cat_events_proposed ON category_events(proposed_a
 CREATE INDEX IF NOT EXISTS idx_cat_events_type ON category_events(event_type);
 
 -- (§7.7 signal_score removed in v3 — replaced by embedding-based pipeline.)
+
+-- FTS5 index over categories for hybrid (BM25 + dense) retrieval at
+-- creation-gate time. See db/category_retrieval.py for the fusion logic.
+-- Contentful rather than external-content: categories is small (<200
+-- rows) and explicit-upserts from the same paths that touch category_vec
+-- are simpler than triggers.
+CREATE VIRTUAL TABLE IF NOT EXISTS category_fts USING fts5(
+    name,
+    description
+);

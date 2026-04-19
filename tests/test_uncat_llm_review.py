@@ -48,7 +48,7 @@ class _CreateAllNamer(FakeNamer):
     name derived from the painpoint title."""
 
     def decide_uncategorized(self, title, description, signal_count, severity,
-                              existing_taxonomy):
+                              existing_taxonomy, nearest_hint=None):
         return UncatDecision(
             action="create",
             reason="fake: always create",
@@ -170,7 +170,8 @@ class TestPriorityAndCap:
             class _RecordingNamer(FakeNamer):
                 def decide_uncategorized(inner_self, title, description,
                                           signal_count, severity,
-                                          existing_taxonomy):
+                                          existing_taxonomy,
+                                          nearest_hint=None):
                     seen.append(title)
                     return UncatDecision(action="keep", reason="fake")
 

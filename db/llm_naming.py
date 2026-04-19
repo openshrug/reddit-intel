@@ -224,44 +224,77 @@ class LLMNamer:
 
     def decide_uncategorized(self, title: str, description: str,
                               signal_count: int, severity: int,
-                              existing_taxonomy: List[dict]) -> UncatDecision:
+                              existing_taxonomy: List[dict],
+                              nearest_hint: Optional[tuple] = None) -> UncatDecision:
         """Review a single Uncategorized painpoint. Decide whether it
         warrants its own category in the tree (and if so, pick a parent
         + propose name/description), or whether it should stay put.
 
-        Conservative by design — default is `keep`.
+        Conservative by design — default is `keep`. Only reached after
+        the caller has confirmed the painpoint has no strong embedding
+        match to an existing category (cosine < CATEGORY_COSINE_THRESHOLD),
+        so the prior is "this might be a genuine gap in the taxonomy,
+        but if in doubt, keep".
+
+        `nearest_hint` is the closest existing category's `(name, cosine)`
+        for context — helps the LLM judge whether the painpoint is a
+        borderline miss that should still live under an existing branch,
+        or a genuinely novel topic. None when no category_vec is populated.
         """
         taxonomy_str = (
             "\n".join(f"  - {e['path']}" for e in existing_taxonomy[:80])
             if existing_taxonomy else "  (empty)"
         )
+        hint_str = ""
+        if nearest_hint is not None:
+            near_name, near_cos = nearest_hint
+            hint_str = (
+                f"\n\nNEAREST EXISTING CATEGORY (by embedding cosine): "
+                f"{near_name!r} at cos={near_cos:.3f}. "
+                f"This is BELOW the routing threshold, so reroute will "
+                f"not move the painpoint there automatically. Still, if "
+                f"the painpoint is a natural-but-off-topic sibling of "
+                f"this category (e.g. same domain, different angle), "
+                f"prefer `keep` — a human will rewrite that category's "
+                f"description later. Only `create` when the topic is "
+                f"genuinely outside every existing branch."
+            )
         system = (
-            "You are a taxonomist reviewing ONE painpoint that landed in the "
-            "Uncategorized bucket. Decide on the merits: does it represent a "
-            "topic worth naming, or is it a one-off that should stay put.\n\n"
-            "CREATE a new category when:\n"
-            "  - The painpoint names a concrete product, workflow, or "
-            "lifestyle concern that an app/service could address (developer "
-            "tooling, dating, fitness, habits, consumer apps — all fair game).\n"
-            "  - It's plausible that similar painpoints will show up (a "
-            "named bucket would collect them, not sit idle).\n"
-            "  - No existing branch is a reasonable home — if a branch "
-            "already fits, reroute will move it there, so answer `keep`.\n\n"
-            "KEEP in Uncategorized when:\n"
-            "  - Pure philosophy, social commentary, or opinion with no "
-            "product/service hook.\n"
-            "  - Genuinely one-off and unlikely to recur.\n"
-            "  - An existing branch in the taxonomy covers it (reroute "
-            "will handle the placement).\n\n"
-            "Judge each case on its merits — no default bias toward either "
-            "action. The seed tree is tech-heavy but consumer / lifestyle / "
-            "relationships are valid new roots when the topic warrants one.\n\n"
-            "When creating, `parent` must EXACTLY match an existing taxonomy "
-            "entry (use the last segment of the path, e.g. 'Databases' from "
-            "'Cloud & Infrastructure > Databases', or a root name). Use null "
-            "only if NO existing root fits — spawning a new root. The new "
-            "category description must be keyword-rich (30-50 words) to help "
-            "future embedding-based routing.\n\n"
+            "You are a taxonomist reviewing ONE painpoint that landed in "
+            "the Uncategorized bucket AND has no strong embedding match "
+            "to any existing category. Decide whether this painpoint "
+            "represents a real gap in the taxonomy that deserves its own "
+            "category, or whether it's a one-off that should stay put.\n\n"
+            "DEFAULT TO `keep`. Only `create` when ALL of these hold:\n"
+            "  - The painpoint names a recurring product/lifestyle/"
+            "workflow concern an app or service could address.\n"
+            "  - You can plausibly imagine 3+ similar painpoints arriving "
+            "within weeks (not just this one).\n"
+            "  - NO existing branch is a reasonable home — not the root, "
+            "not any child. If any existing category is even a stretch, "
+            "prefer `keep`.\n"
+            "  - The new category you would mint is semantically distinct "
+            "from every branch already in the tree below (no near-synonym "
+            "of an existing name).\n\n"
+            "KEEP when:\n"
+            "  - Any existing branch could plausibly cover it — even if "
+            "the fit is imperfect. (A human will rewrite the branch's "
+            "description later; meanwhile the painpoint sits in Uncat or "
+            "gets rerouted.)\n"
+            "  - Philosophy, commentary, or opinion with no product hook.\n"
+            "  - Unique / one-off / unlikely to recur.\n"
+            "  - You'd be picking a name that sounds like a variant of "
+            "an existing one (e.g. 'CRM Software Solutions' when "
+            "'CRM & Sales' exists, or 'Dating Metrics' when "
+            "'Dating & Relationships' exists).\n\n"
+            "When creating, `parent` must EXACTLY match an existing "
+            "taxonomy entry (use the last segment of the path, e.g. "
+            "'Databases' from 'Cloud & Infrastructure > Databases', or a "
+            "root name). Use null for parent ONLY if no existing root "
+            "fits at all — spawning a new root is a strong statement and "
+            "requires the painpoint to be clearly outside the existing "
+            "roots' domains. Description must be keyword-rich (30-50 "
+            "words)." + hint_str + "\n\n"
             "EXISTING TAXONOMY TREE:\n" + taxonomy_str
         )
         user = json.dumps({
@@ -362,10 +395,11 @@ class FakeNamer:
         return {"description": f"Merged: {survivor_name} + {loser_name}"}
 
     def decide_uncategorized(self, title, description, signal_count, severity,
-                              existing_taxonomy):
+                              existing_taxonomy, nearest_hint=None):
         """Test double: default to `keep` so hermetic tests don't spuriously
         spawn new categories. Override via name_fn/split_fn isn't wired here
         — callers that need create-paths should inject their own namer."""
+        del nearest_hint  # accepted for signature parity with LLMNamer
         return UncatDecision(action="keep", reason="fake: default keep")
 
     def decide_painpoint_merge(self, a_title, a_description,

@@ -9,8 +9,8 @@ AI/ML:
     AI Coding Tools: AI code completion, Copilot, Cursor, code generation, AI pair programming, coding agents, hallucination in code suggestions, AI IDE assistants
     LLM Infrastructure: LLM inference, model serving, GPU memory, quantization, context window, fine-tuning, LoRA, model hosting, vLLM, Ollama, inference speed, token throughput
     Multi-Agent Systems: AI agent orchestration, multi-agent workflows, agent frameworks, LangChain agents, CrewAI, autonomous agents, tool-calling agents
-    AI Search & RAG: Retrieval-augmented generation, semantic search, vector databases, embedding search, document retrieval, Pinecone, Weaviate, chunking strategies
-    Generative Media: Image generation, Stable Diffusion, DALL-E, video generation, audio synthesis, AI design tools, Midjourney, text-to-image, text-to-video
+    AI Search & RAG: Retrieval-augmented generation, RAG pipelines, semantic retrieval over documents, embedding search, chunking strategies, Pinecone and Weaviate as RAG backends. NOT general-purpose database concerns — see Databases for those.
+    Generative Media: AI image synthesis, Stable Diffusion, DALL-E, Midjourney, text-to-image, text-to-video, generative audio, diffusion models. Strictly generative AI — non-AI video editing / non-AI design tooling lives under Creator & Content.
     AI Safety: LLM guardrails, prompt injection attacks, jailbreaks, AI model alignment, red teaming LLMs, hallucination detection, LLM output validation, AI evaluation harnesses, model safety filters (narrowly about AI/LLM safety — NOT about community moderation, content moderation on social platforms, or interpersonal/dating moderation)
     AI in Biotech: Drug discovery, protein folding, AlphaFold, bio-informatics, genomics ML, clinical trial optimization
 
@@ -29,7 +29,7 @@ Cloud & Infrastructure:
     Compute & Hosting: Servers, containers, Kubernetes, serverless, Lambda, ECS, pod scheduling, autoscaling, node management, pod eviction, cluster scaling
     Data Centers: Physical infrastructure, power, colocation, network fabric, rack management
     Edge & CDN: Edge computing, content delivery, Cloudflare, CDN caching, edge functions, latency optimization
-    Databases: SQL databases, PostgreSQL, MySQL, MongoDB, Redis, connection pools, query performance, database migrations, indexing, vacuum, replication, connection exhaustion, pool management, cache eviction
+    Databases: Operational databases, PostgreSQL, MySQL, MongoDB, Redis, connection pools, query performance, database migrations, indexing, vacuum, replication, connection exhaustion, pool management, cache eviction. NOT vector / RAG databases — those live under AI Search & RAG.
     Cloud Platforms: AWS, GCP, Azure, multi-cloud, cloud costs, cloud networking, VPC, IAM, cloud storage, S3
 
 Security & Privacy:
@@ -41,7 +41,7 @@ Security & Privacy:
     Privacy Tools: End-to-end encryption, VPN, data protection, GDPR compliance, data anonymization, consent management, PII handling
 
 Data & Analytics:
-  desc: Data engineering, data pipelines, warehouses, analytics, business intelligence
+  desc: The data stack — moving, storing, transforming, and reporting on business data. Umbrella for the full lifecycle from ingestion through dashboards; specific tool categories (pipelines, warehouses, BI, quality) live as children below.
   children:
     Data Pipelines: ETL, ELT, streaming, Apache Kafka, Spark, Airflow, Dagster, data orchestration, batch processing, event streaming, data ingestion
     Data Warehouses: Data lakehouse, Snowflake, BigQuery, Redshift, OLAP, columnar storage, data modeling, dbt
@@ -67,10 +67,10 @@ Fintech:
 Creator & Content:
   desc: Tools for creators, content production, media, publishing
   children:
-    Video Tools: Video editing, screen recording, Loom, demo tools, video hosting, transcription, video compression
+    Video Tools: Non-generative video editing, screen recording, Loom, demo tools, video hosting, transcription, video compression. Human-driven video workflows — generative AI video creation lives under AI/ML > Generative Media.
     Writing & Publishing: Blog platforms, newsletters, documentation tools, CMS, Markdown editors, technical writing
     Social Media Tools: Social scheduling, analytics, content management, cross-posting, audience growth
-    Design Tools: Figma, prototyping, UI design, design systems, asset management, wireframing, Canva alternatives
+    Design Tools: Figma, prototyping, UI design, design systems, asset management, wireframing, Canva alternatives. Human-driven design workflows — generative AI image / design tools live under AI/ML > Generative Media.
 
 Productivity & Workflow:
   desc: Personal and team productivity, project management, knowledge management
@@ -81,9 +81,39 @@ Productivity & Workflow:
     Automation: No-code platforms, Zapier, n8n, workflow automation, RPA, business process automation
 
 Business & Sales:
-  desc: CRM, sales, marketing, customer operations, revenue tools
+  desc: Revenue operations and go-to-market tooling for B2B and enterprise teams. Broad umbrella spanning outbound, inbound, post-sale, and people ops — specific tool categories (CRM, email marketing, support desks, applicant tracking) live as children below.
   children:
     CRM & Sales: Sales pipelines, lead generation, Salesforce, HubSpot, deal tracking, sales automation, outbound tools
     Marketing Automation: Email marketing, campaign management, attribution, SEO tools, landing pages, A/B testing
     Customer Support: Help desks, ticketing systems, Zendesk, Intercom, chatbots, customer service, SLA management
-    HR & Recruiting: Hiring platforms, ATS, onboarding, people operations, payroll, employee engagement
+    HR & Recruiting: Hiring platforms, applicant tracking systems (ATS), onboarding, people operations, payroll, employee engagement
+
+Dating & Relationships:
+  desc: Romantic relationships, dating apps, attraction, interpersonal connection, modern dating culture, attachment, breakups, partner communication, singles looking for partners. Covers both the apps/platforms and the lived experience — distinct from Productivity (which is work output) and from Mental Health (which is clinical wellbeing).
+  children:
+    Dating Apps & Matching: Tinder, Hinge, Bumble, matching algorithms, profile optimization, swiping fatigue, match quality, photo selection, bio writing, paid boosts, dating app monetization gripes
+    Conversation & Communication: First messages, texting, conversation openers, ghosting, response times, flirting, banter, voice notes, awkward silences, confessions, conflict with a partner
+    Attachment & Emotional Health: Attachment styles, anxious / avoidant dynamics, breakup recovery, trauma bonds, emotional regulation within relationships, toxic partners, emotional abuse, healing from a relationship
+    Gendered Dating Experience: Male-specific dating pain, female-specific dating pain, red pill / black pill discourse, looks vs personality debates, dating market commentary, incel-adjacent frustration, hypergamy discussions
+    Relationship Structure & Consent: Monogamy, non-monogamy, ethical non-monogamy, consent conversations, boundaries, deal-breakers, sexual compatibility, pace of relationship escalation
+
+Health & Lifestyle:
+  desc: Personal physical and mental wellbeing, daily living habits, nutrition, fitness, neurodivergence, sleep, parenting. Consumer-facing habit and health pain — NOT work productivity (see Productivity & Workflow) and NOT clinical workflow tooling.
+  children:
+    Nutrition: Meal planning, macros, diet tracking, personalized nutrition, vegan / plant-based eating, cooking at home, grocery optimization, calorie counting apps, supplement routines
+    Fitness: Workout programming, gym habits, running, strength training, fitness motivation, home workouts, tracking progress, PRs, mobility, yoga, stretching
+    Mental Health: Anxiety, depression, burnout, therapy access, men's mental health, journaling, mood tracking, mindfulness apps, bereavement support, stress management
+    Neurodivergence: ADHD productivity methods, autism-friendly tooling, executive function, focus aids, sensory accommodation, stimulant management, body doubling apps
+    Sleep & Recovery: Sleep tracking, insomnia, wind-down routines, circadian rhythm, recovery metrics, nap strategy
+    Family & Parenting: Stay-at-home parents, childcare logistics, family scheduling, parenting advice, pet health and allergies, household routines
+    Habits & Discipline: Habit formation, streaks, gamified habits, self-control, ascetic discipline, daily reflection, goal setting, personal growth frameworks
+
+App Business:
+  desc: Building, launching, and monetizing apps — indie and SMB side of the software industry. Covers distribution, paywalls, onboarding, reviews, store listings, and indie-founder growth loops. Distinct from Business & Sales (enterprise CRM / marketing automation) and from Productivity & Workflow (internal team tools).
+  children:
+    App Store Optimization: ASO, keyword research, app store listings, screenshots, localization, store ranking, review response, app title experiments
+    Paywalls & Onboarding: Paywall placement, onboarding flow, first-screen conversion, trial-to-paid conversion, activation metrics
+    App Monetization & Pricing: In-app purchases, subscription tiers, lifetime deals, free trials, price experimentation, per-month vs yearly framing, freemium design
+    App Launch & Validation: MVP launches, Product Hunt launches, indie launch strategy, product validation before building, demand discovery for apps
+    Indie App Marketing: Indie developer promotion, solo-founder growth, social proof, product launch visibility, cold outbound for indie apps, founder-led marketing
+    App Reviews & Feedback: App store reviews, user feedback collection, roasts and critique, in-app feedback flows, handling negative reviews

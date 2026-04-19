@@ -51,6 +51,13 @@ _MIGRATIONS = [
     # When this painpoint was last reroute-checked; skip re-checking if
     # nothing relevant has changed since.
     "ALTER TABLE painpoints ADD COLUMN reroute_checked_at TEXT",
+    # Seed vs runtime-minted. Seed categories (from taxonomy.yaml + the
+    # Uncategorized sentinel) have human-curated name/description anchors;
+    # runtime-minted ones have LLM-synthesized descriptions of unknown
+    # quality. update_category_embedding uses this flag to pick the
+    # anchor-vs-member-mean blend weight — seeds trust the anchor heavily
+    # (declared intent), runtime categories lean more on member evidence.
+    "ALTER TABLE categories ADD COLUMN is_seed INTEGER NOT NULL DEFAULT 0",
 ]
 
 
@@ -114,14 +121,33 @@ def init_db():
     # INSERT OR IGNORE so re-running init_db() is a no-op.
     conn = get_db()
     conn.execute(
-        "INSERT OR IGNORE INTO categories (name, parent_id, description, created_at) "
-        "VALUES (?, NULL, ?, ?)",
+        "INSERT OR IGNORE INTO categories "
+        "(name, parent_id, description, created_at, is_seed) "
+        "VALUES (?, NULL, ?, ?, 1)",
         ("Uncategorized",
          "Sentinel bucket for painpoints awaiting category-worker processing.",
          _now()),
     )
     conn.commit()
     conn.close()
+
+    # Backfill is_seed for DBs created before this column existed. Also
+    # picks up cases where taxonomy.yaml grew a new entry whose name
+    # matches an existing runtime-minted category — that category now
+    # gets promoted to seed, which is the taxonomist's intent.
+    from .seed import backfill_is_seed
+    backfill_is_seed()
+
+    # Bulk-populate category_fts for any category that predates the
+    # virtual table (or was inserted on a code path that didn't sync).
+    # Idempotent — already-indexed categories are skipped by anti-join.
+    from .category_retrieval import init_category_fts
+    conn = get_db()
+    try:
+        init_category_fts(conn)
+        conn.commit()
+    finally:
+        conn.close()
 
     # Eagerly bootstrap category embeddings if an OPENAI_API_KEY is set.
     # Done OUTSIDE the merge_lock so the first promote_pending doesn't
