@@ -81,8 +81,27 @@ event id from the audit log (snapshot 4's `dump.md` section 6, or
 ## Output for `report.md`
 
 A `## Dimension 3 -- Pending -> painpoint merge` section in the shape
-defined in `00_protocol.md` section 6. Cite at least one **good** and
+defined in `00_protocol.md` section 7. Cite at least one **good** and
 one **bad** multi-source painpoint, and explicitly contrast
 promote-time merging (snapshots 2-3) with sweep-time merging
 (snapshot 4 only) -- they share a verdict but have different failure
 modes.
+
+## When invoked as a sub-agent
+
+If a parent evaluator dispatched you (per `00_protocol.md` section 2),
+return a single message in exactly this shape:
+
+```
+META: score=<int 1-5>; verdict=<pass|mixed|fail>; headline=<one sentence>
+
+## Dimension 3 -- Pending -> painpoint merge
+
+<full section body as specified in "Output for `report.md`" above>
+```
+
+The `META:` line must be the first line of your response, contain no
+internal `;` in the headline, and be followed by a blank line then the
+`##` heading. Don't add wrapper prose, meta-commentary, or notes about
+how you arrived at the verdict -- the parent already has the
+protocol; your output is pasted into the report verbatim.

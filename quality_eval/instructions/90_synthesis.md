@@ -9,9 +9,23 @@
 ## When to read this file
 
 After every dimension has been evaluated and the four sections are
-ready (whether you did them yourself sequentially or fanned out to
-sub-agents). This is the last step before writing `report.md` to the
-run directory.
+ready. The default execution model (see `00_protocol.md` section 2)
+fans out one sub-agent per dimension in parallel; in that case, by
+the time you reach this file you should have:
+
+- four `META:` header lines (one per sub-agent), already parsed into
+  `(dimension, score, verdict, headline)` tuples for the summary
+  table;
+- four markdown bodies, each starting with `## Dimension N -- ...`,
+  ready to paste into the report in dimension order.
+
+If you ran the evaluation sequentially as a single agent, you have
+the same four sections; you just produced them yourself and there is
+no `META:` line to parse (read the `## Dimension N` heading + the
+verdict/score/headline you wrote).
+
+This file is the last step before writing `report.md` to the run
+directory.
 
 ## Cross-dimensional recommendations
 

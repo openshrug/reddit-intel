@@ -72,9 +72,28 @@ context).
 ## Output for `report.md`
 
 A `## Dimension 2 -- Pending dedup` section in the shape defined in
-`00_protocol.md` section 6. If `metrics.json -> pending_dedup.groups_with_extras`
+`00_protocol.md` section 7. If `metrics.json -> pending_dedup.groups_with_extras`
 is zero across all snapshots, say so explicitly: report Verdict =
 "not exercised", note that the extract-time merge path didn't fire in
 this run, and skip the examples list (but still flag this as an
 observation in the failure modes -- either the data was too sparse or
 the threshold is too tight to ever fire).
+
+## When invoked as a sub-agent
+
+If a parent evaluator dispatched you (per `00_protocol.md` section 2),
+return a single message in exactly this shape:
+
+```
+META: score=<int 1-5>; verdict=<pass|mixed|fail>; headline=<one sentence>
+
+## Dimension 2 -- Pending dedup
+
+<full section body as specified in "Output for `report.md`" above>
+```
+
+The `META:` line must be the first line of your response, contain no
+internal `;` in the headline, and be followed by a blank line then the
+`##` heading. Don't add wrapper prose, meta-commentary, or notes about
+how you arrived at the verdict -- the parent already has the
+protocol; your output is pasted into the report verbatim.

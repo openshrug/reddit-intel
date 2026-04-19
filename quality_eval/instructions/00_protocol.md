@@ -46,7 +46,78 @@ do.
 
 ---
 
-## 2. Inputs
+## 2. Execution model: fan out to one sub-agent per dimension
+
+The four dimensions are independent (no shared judgment state), so
+**dispatch one sub-agent per dimension in parallel**, then synthesize
+their outputs yourself. This keeps contexts clean (a dim-4 sub-agent
+isn't biased by 25 noisy pendings it just read for dim 1) and cuts
+wall-clock roughly 4×. Single-agent sequential evaluation is supported
+as a fallback (just read the per-dim files yourself in order), but
+parallel sub-agents are the default.
+
+### Dispatch contract
+
+For each dimension `N` in `{1, 2, 3, 4}`, spawn a sub-agent and give
+it:
+
+- The **run directory** absolute path (e.g.
+  `/abs/path/.../quality_eval/runs/openclaw_..._20260419-101530/`).
+- The corresponding **per-dimension file** to follow:
+  - dim 1 -> `quality_eval/instructions/10_extraction.md`
+  - dim 2 -> `quality_eval/instructions/20_pending_dedup.md`
+  - dim 3 -> `quality_eval/instructions/30_pending_merge.md`
+  - dim 4 -> `quality_eval/instructions/40_category.md`
+- A pointer to **this file** (`00_protocol.md`) for the snapshot-
+  inspection helper API, the threshold-lookup rule, and the hard
+  rules.
+
+Use Cursor's `Task` tool with `subagent_type="generalPurpose"` (the
+sub-agent needs to read code, run Python helpers against the snapshot
+DB, and grep for live constant values, so read-only mode is too
+restrictive).
+
+**Fan out all four in a single tool-call batch.** Do not await one
+sub-agent before dispatching the next.
+
+### Sub-agent return contract
+
+Every sub-agent must return a single message in this exact shape:
+
+```
+META: score=<int 1-5>; verdict=<pass|mixed|fail>; headline=<one sentence>
+
+## Dimension <N> -- <name>
+
+<full markdown body of the dimension section, ready to paste into report.md>
+```
+
+- The first line is the `META:` header. Parse it for the summary
+  table; never let it leak into the report body.
+- Everything after the blank line is the dimension's report section.
+  It starts with the `## Dimension N -- ...` heading and contains the
+  Numbers, Examples, and Failure modes subsections defined in
+  Section 7 below.
+- The headline must be a single sentence with no internal `;`
+  characters (so the META line stays trivially parseable).
+
+If a sub-agent returns malformed output (missing META, wrong header
+line shape) or reports an error, **do not fall back silently**:
+re-dispatch with a corrective note, or evaluate that dimension inline
+and flag the redo in the final report's Recommendations section.
+
+### After the sub-agents return
+
+1. Parse each `META:` line into one row of the summary table.
+2. Concatenate the four section bodies in dimension order (1 -> 4).
+3. Read `90_synthesis.md` and run the cross-dimensional protocol
+   (compound failure scan + recommendations).
+4. Assemble the final `report.md` per the template in
+   `90_synthesis.md` and write it to the run directory.
+
+---
+
+## 3. Inputs
 
 ```
 quality_eval/runs/<sub1>_<sub2>_..._<YYYYMMDD-HHMMSS>/   <- run dir
@@ -65,7 +136,7 @@ run yet). Snapshot 4 is post-sweep and is the only one with rows in
 
 ---
 
-## 3. Inspecting a snapshot
+## 4. Inspecting a snapshot
 
 From the `reddit-intel/` repo root:
 
@@ -97,7 +168,7 @@ queries when no helper fits.
 
 ---
 
-## 4. Pipeline thresholds (look them up; don't memorize)
+## 5. Pipeline thresholds (look them up; don't memorize)
 
 Each per-dimension file references one or more of these constants:
 
@@ -116,7 +187,7 @@ actually in force for this run.
 
 ---
 
-## 5. Source-of-truth code (read before judging)
+## 6. Source-of-truth code (read before judging)
 
 Doc prose ages faster than code. Before writing a verdict for any
 dimension, **read the actual functions that implement that dimension
@@ -128,7 +199,7 @@ verdict and your failure-mode list.
 
 ---
 
-## 6. Per-dimension report shape
+## 7. Per-dimension report shape
 
 Each dimension's section in `report.md` must contain:
 
@@ -149,7 +220,7 @@ per-dimension file.
 
 ---
 
-## 7. Hard rules
+## 8. Hard rules
 
 - Every example must carry a real id from the snapshot. **No
   fabrication.**

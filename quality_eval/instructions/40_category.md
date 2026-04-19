@@ -91,9 +91,28 @@ For every example you cite:
 ## Output for `report.md`
 
 A `## Dimension 4 -- Category assignment` section in the shape defined
-in `00_protocol.md` section 6. Cover **both** promote-time placement
+in `00_protocol.md` section 7. Cover **both** promote-time placement
 quality (snapshots 1-3) **and** post-sweep tree quality (snapshot 4),
 and quote at least 3 audit-log events with reasons (mix accepts and
 rejects). If a sweep step never fired (`proposed = 0` in
 `category_events.<event_type>`), call it out -- it's a signal worth
 flagging.
+
+## When invoked as a sub-agent
+
+If a parent evaluator dispatched you (per `00_protocol.md` section 2),
+return a single message in exactly this shape:
+
+```
+META: score=<int 1-5>; verdict=<pass|mixed|fail>; headline=<one sentence>
+
+## Dimension 4 -- Category assignment
+
+<full section body as specified in "Output for `report.md`" above>
+```
+
+The `META:` line must be the first line of your response, contain no
+internal `;` in the headline, and be followed by a blank line then the
+`##` heading. Don't add wrapper prose, meta-commentary, or notes about
+how you arrived at the verdict -- the parent already has the
+protocol; your output is pasted into the report verbatim.
