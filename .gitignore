@@ -23,3 +23,5 @@ docs/_internal/
 report.md
 out.txt
 idea.txt
+quality_eval/snapshots/
+quality_eval/runs/
