@@ -57,9 +57,10 @@ MIN_SUB_CLUSTER_SIZE = 3
 # uncat-review + painpoint_merge). Raised from 5 → 30 after observing
 # uncat-review was the dominant sweep cost at ~135 calls × 2s / 5
 # workers ≈ 55s. With 30 workers the same batch finishes in ~10s.
-# The global OPENAI_API_SEMAPHORE (see llm.py) is raised to match —
+# The OPENAI_COMPLETION_SEMAPHORE (see llm.py) is sized to match —
 # the sweep runs standalone (no concurrent extraction), so there's no
-# other consumer to contend with.
+# other consumer to contend with on the completion bucket. Embeddings
+# go through OPENAI_EMBEDDING_SEMAPHORE (separate, larger pool).
 _LLM_PARALLEL_WORKERS = 30
 # Lowered from 5 after a live-sweep pass over 145 Uncategorized
 # members fired 0 add_category_new events: clusters of 3-4 related

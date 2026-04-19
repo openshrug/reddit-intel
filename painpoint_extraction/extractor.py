@@ -146,9 +146,13 @@ async def extract_painpoints_from_posts(
     items = [item for batch_items in batch_results for item in batch_items]
 
     usage = counter.as_dict()
-    log.info("extract: tokens — input: %d, output: %d (reasoning: %d, text: %d)",
-             usage["input_tokens"], usage["output_tokens"],
-             usage["reasoning_tokens"], usage["text_tokens"])
+    log.info(
+        "extract: tokens — input: %d (cached: %d, %.1f%% hit), "
+        "output: %d (reasoning: %d, text: %d)",
+        usage["input_tokens"], usage["cached_input_tokens"],
+        usage["cache_hit_pct"], usage["output_tokens"],
+        usage["reasoning_tokens"], usage["text_tokens"],
+    )
 
     return items, usage
 

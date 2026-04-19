@@ -3012,12 +3012,16 @@ class TestOpenAISemaphore:
     uses a fake client that records the number of concurrent invocations."""
 
     def test_semaphore_caps_concurrent_embedding_calls(self, fresh_db):
-        """If 20 threads try to embed at once, the semaphore must cap
-        in-flight calls to its bound (default 10) — never more."""
+        """If 20 threads try to embed at once, the embedding semaphore
+        must cap in-flight calls to its bound — never more. We assert
+        against `OPENAI_EMBEDDING_CONCURRENCY` (the per-model bucket
+        introduced in the Phase 1 split, sized at 80 — much larger than
+        the 30-slot completion bucket because text-embedding-3-small
+        has ~5x the RPM/TPM headroom of gpt-5-nano)."""
         import threading
 
         from db.embeddings import OpenAIEmbedder
-        from llm import OPENAI_CONCURRENCY
+        from llm import OPENAI_EMBEDDING_CONCURRENCY
 
         in_flight = [0]
         peak = [0]
@@ -3055,13 +3059,16 @@ class TestOpenAISemaphore:
             t.join(timeout=10)
             assert not t.is_alive()
 
-        # Peak in-flight must never exceed the semaphore bound
-        assert peak[0] <= OPENAI_CONCURRENCY, (
-            f"semaphore failed: peak {peak[0]} > bound {OPENAI_CONCURRENCY}"
+        # Peak in-flight must never exceed the embedding semaphore bound.
+        assert peak[0] <= OPENAI_EMBEDDING_CONCURRENCY, (
+            f"semaphore failed: peak {peak[0]} > bound {OPENAI_EMBEDDING_CONCURRENCY}"
         )
-        # And it should actually GET to the bound (not be artificially low)
-        # — with 20 workers and 50ms holds, we should saturate the bound.
-        assert peak[0] >= max(2, OPENAI_CONCURRENCY // 2), (
+        # And it should actually fan out — with only 20 workers and a
+        # bound of 80 we expect every worker to run in parallel, so
+        # peak should be at least min(N_workers, 2). The original
+        # "≥ bound/2" check no longer fits a bound that's larger than
+        # the worker count.
+        assert peak[0] >= 2, (
             f"semaphore unexpectedly low — peak={peak[0]}, "
             f"likely workers ran serially. Test setup issue?"
         )
@@ -3373,13 +3380,15 @@ class TestParallelStressNoDeadlocks:
     HARD_TIMEOUT_SEC = 60
 
     def test_semaphore_under_heavy_thread_contention(self, fresh_db):
-        """100 worker threads all racing for the 10-slot semaphore.
+        """100 worker threads all racing for the embedding semaphore.
         Each does a tiny embed call. None may hang; total wall-clock
-        must be bounded; peak in-flight must respect the bound."""
+        must be bounded; peak in-flight must respect the bound. After
+        the Phase 1 per-model split the bucket is `OPENAI_EMBEDDING_CONCURRENCY`
+        (80), so 100 workers create real contention (~20 must queue)."""
         import threading
 
         from db.embeddings import OpenAIEmbedder
-        from llm import OPENAI_CONCURRENCY
+        from llm import OPENAI_EMBEDDING_CONCURRENCY
 
         in_flight = [0]
         peak = [0]
@@ -3420,10 +3429,10 @@ class TestParallelStressNoDeadlocks:
         elapsed = time.monotonic() - start
 
         assert completed[0] == N, f"only {completed[0]}/{N} completed"
-        assert peak[0] <= OPENAI_CONCURRENCY, (
-            f"semaphore overrun: peak {peak[0]} > {OPENAI_CONCURRENCY}"
+        assert peak[0] <= OPENAI_EMBEDDING_CONCURRENCY, (
+            f"semaphore overrun: peak {peak[0]} > {OPENAI_EMBEDDING_CONCURRENCY}"
         )
-        # 100 workers × 20ms each / 10 slots = 200ms minimum; allow slack
+        # 100 workers × 20ms each / 80 slots ≈ 25ms minimum; allow slack.
         assert elapsed < 5.0, f"semaphore contention took {elapsed}s"
 
     def test_batched_promoter_no_deadlock_with_concurrent_sweep(self, fresh_db):

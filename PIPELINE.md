@@ -218,10 +218,17 @@ category_vec = normalize(w · anchor + (1-w) · mean_of_members)
 anchor table in a single `embed_batch` call for every seed category
 that doesn't have one yet, then blends into `category_vec`.
 
-**OpenAI concurrency budget.** `OpenAIEmbedder._embed_with_retry`
-acquires the global `OPENAI_API_SEMAPHORE` from `llm.py` around every
-HTTP call. Embeddings + completions share one process-wide budget of
-`OPENAI_CONCURRENCY=10` in-flight calls. Sized for tier-1 RPM limits.
+**OpenAI concurrency budget.** Per-model: `OpenAIEmbedder._embed_with_retry`
+acquires `OPENAI_EMBEDDING_SEMAPHORE` (default 80 slots) and `llm_call`
+acquires `OPENAI_COMPLETION_SEMAPHORE` (default 30 slots). Both buckets
+live in `llm.py` and route through the shared `call_with_openai_retry`
+helper. The split (Phase 1) prevents completion fan-out — which holds
+slots 5-10x longer than embedding calls — from starving embedding
+callers; sizing reflects the ~5x RPM/TPM headroom embeddings get over
+`gpt-5-nano` at tier 1. Phase 2 (token-velocity tracker) is documented
+in `docs/IMPROVEMENTS.md`. The legacy `OPENAI_API_SEMAPHORE` /
+`OPENAI_CONCURRENCY` symbols are kept as deprecated aliases of the
+completion bucket for downstream consumers (see §12).
 
 ### Relevance (`db/relevance.py`)
 
@@ -504,8 +511,9 @@ it was "cascade from earlier merge" vs "apply error: foo".
 | `CATEGORY_STALE_DAYS`             | `db/category_events`     | 30    | Member-set idle → propose delete.           |
 | `REROUTE_MARGIN`                  | `db/category_events`     | 0.10  | Min cosine gap to propose reroute.          |
 | `MAX_UNCAT_LLM_REVIEWS`           | `db/category_events`     | None  | Per-sweep cap on Uncat singleton reviews (unbounded). |
-| `_LLM_PARALLEL_WORKERS`           | `db/category_events`     | 30    | Parallel LLM fan-out (below OPENAI_CONCURRENCY). |
-| `OPENAI_CONCURRENCY`              | `llm.py`                 | 10    | Process-wide cap on in-flight OpenAI calls. |
+| `_LLM_PARALLEL_WORKERS`           | `db/category_events`     | 30    | Parallel LLM fan-out (≤ OPENAI_COMPLETION_CONCURRENCY). |
+| `OPENAI_COMPLETION_CONCURRENCY`   | `llm.py`                 | 30    | Process-wide cap on in-flight OpenAI completion calls (gpt-5-nano / gpt-4.1-mini). |
+| `OPENAI_EMBEDDING_CONCURRENCY`    | `llm.py`                 | 80    | Process-wide cap on in-flight OpenAI embedding calls (text-embedding-3-small). |
 | `BATCH_TOKEN_BUDGET`              | `extractor.py`           | 2_000 | Approx tokens per LLM extraction batch.     |
 | `LLM_CONCURRENCY`                 | `extractor.py`           | 40    | Parallel extraction batches.                |
 
@@ -586,7 +594,7 @@ it was "cascade from earlier merge" vs "apply error: foo".
 | Anchor tests                     | `tests/test_category_anchor.py`         |
 | Uncat LLM-review tests           | `tests/test_uncat_llm_review.py`        |
 | Creation-gate + replant tests    | `tests/test_creation_gate.py`           |
-| OpenAI shared utilities + semaphore | `llm.py` (`OPENAI_API_SEMAPHORE`, `llm_call`, `TokenCounter`) |
+| OpenAI shared utilities + per-model semaphores | `llm.py` (`OPENAI_COMPLETION_SEMAPHORE`, `OPENAI_EMBEDDING_SEMAPHORE`, `call_with_openai_retry`, `llm_call`, `TokenCounter`) |
 
 ---
 
@@ -603,7 +611,7 @@ a small, stable surface from here. Treat these symbols as a
 | `painpoint_extraction.extract_painpoints`   | LLM extraction with engine SQLite I/O (solo-agent path) |
 | `painpoint_extraction.extract_painpoints_from_posts` | Pure dict-in / dict-out extraction (no DB) — for consumers with their own storage |
 | `db.embeddings.OpenAIEmbedder`              | 1536-dim embeddings, `embed` + `embed_batch` |
-| `llm.OPENAI_API_SEMAPHORE`                  | Module-global concurrency cap — downstream may swap this for a distributed implementation at process boot |
+| `llm.OPENAI_COMPLETION_SEMAPHORE` / `llm.OPENAI_EMBEDDING_SEMAPHORE` | Per-model concurrency caps — downstream may swap either for a distributed implementation at process boot. Legacy `llm.OPENAI_API_SEMAPHORE` is a deprecated alias of the completion bucket and will be removed in a future major bump. |
 | Pending-painpoint dict shape (fields: `title`, `description`, `severity`, `quoted_text`, `category_name`, `post_id`, `comment_id?`) | Data handoff from `extract_painpoints` |
 
 **Stability rules:**

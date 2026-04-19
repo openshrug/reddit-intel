@@ -16,6 +16,8 @@ import math
 import random
 import struct
 
+from llm import OPENAI_EMBEDDING_SEMAPHORE, call_with_openai_retry
+
 EMBEDDING_MODEL = "text-embedding-3-small"
 EMBEDDING_DIM = 1536
 MERGE_COSINE_THRESHOLD = 0.60   # above this -> merge into existing painpoint
@@ -90,37 +92,22 @@ class OpenAIEmbedder:
             self._client = openai.OpenAI(timeout=60.0)
         return self._client
 
-    def _embed_with_retry(self, inputs, retries=2, backoff_base=4):
-        """Call client.embeddings.create with exponential backoff on
-        transient errors. Acquires the shared OpenAI concurrency
-        semaphore (defined in llm.py) so embedding calls share the same
-        in-flight budget as completion calls."""
-        import logging
-        import time
-
-        from llm import OPENAI_API_SEMAPHORE
-        log = logging.getLogger(__name__)
+    def _embed_with_retry(self, inputs):
+        """Call ``client.embeddings.create`` with the shared rate-limit-
+        aware retry policy. Delegates to ``llm.call_with_openai_retry``
+        but passes its own bucket (`OPENAI_EMBEDDING_SEMAPHORE`) so
+        embedding traffic doesn't sit behind in-flight completions —
+        text-embedding-3-small has ~5x the RPM/TPM headroom of
+        gpt-5-nano and ~5-10x faster round-trips, so a separate
+        80-slot pool keeps the embedding path from being throttled by
+        completion-side pressure. Retry strategy is identical (429-aware
+        Retry-After parsing, full-jitter exponential for 5xx/network)."""
         client = self._get_client()
-        last_exc = None
-        for attempt in range(1 + retries):
-            try:
-                # Sleep between retries happens OUTSIDE the semaphore so
-                # backing-off threads don't hog a slot.
-                with OPENAI_API_SEMAPHORE:
-                    return client.embeddings.create(
-                        model=EMBEDDING_MODEL, input=inputs
-                    )
-            except Exception as exc:
-                last_exc = exc
-                if attempt >= retries:
-                    raise
-                delay = backoff_base * (2 ** attempt)
-                log.warning(
-                    "embed attempt %d/%d failed (%s), retrying in %ds",
-                    attempt + 1, 1 + retries, exc, delay,
-                )
-                time.sleep(delay)
-        raise last_exc
+        return call_with_openai_retry(
+            lambda: client.embeddings.create(model=EMBEDDING_MODEL, input=inputs),
+            label="embed",
+            semaphore=OPENAI_EMBEDDING_SEMAPHORE,
+        )
 
     @staticmethod
     def _sanitize(text):
