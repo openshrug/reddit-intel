@@ -11,7 +11,14 @@ Run with:  pytest tests/test_extraction.py -v
 """
 
 import asyncio
+from typing import get_args
 
+from painpoint_extraction.evidence_filter import (
+    ALLOWED_EVIDENCE_TYPES,
+    DROP_EVIDENCE_TYPES,
+    EvidenceType,
+    filter_non_pain_items,
+)
 from painpoint_extraction.postprocess import postprocess_painpoints
 
 # ===========================================================================
@@ -31,13 +38,90 @@ def _comment(id=100, body="comment body text", score=5):
 
 
 def _item(post_id=1, comment_id=None, quoted_text="some phrase", title="Pain",
-          description="desc", severity=5, category_name="Uncategorized"):
-    return {
+          description="desc", severity=5, category_name="Uncategorized",
+          evidence_type=None):
+    item = {
         "post_id": post_id, "comment_id": comment_id,
         "quoted_text": quoted_text, "title": title,
         "description": description, "severity": severity,
         "category_name": category_name,
     }
+    if evidence_type is not None:
+        item["evidence_type"] = evidence_type
+    return item
+
+
+# ===========================================================================
+# evidence_filter — unit tests
+# ===========================================================================
+
+
+class TestEvidenceFilter:
+    def test_label_set_is_consistent(self):
+        """ALLOWED + DROP tuples are the source of truth; the EvidenceType
+        Literal is derived from them. Asserts the derivation hasn't drifted
+        and that the two buckets are disjoint."""
+        allowed = set(ALLOWED_EVIDENCE_TYPES)
+        drop = set(DROP_EVIDENCE_TYPES)
+        assert allowed.isdisjoint(drop), (
+            f"label appears in both buckets: {allowed & drop}"
+        )
+        assert set(get_args(EvidenceType)) == allowed | drop
+
+    def test_keeps_only_explicit_pain_labels_and_strips_internal_field(self):
+        items = [
+            _item(title="Direct", evidence_type="direct_complaint"),
+            _item(title="Missing", evidence_type="missing_feature"),
+            _item(title="Broken", evidence_type="broken_experience"),
+            _item(title="Need", evidence_type="unmet_need"),
+            _item(title="Joke", evidence_type="joke_meme_sarcasm"),
+            _item(title="Pitch", evidence_type="self_promotion_showcase"),
+        ]
+
+        kept, stats = filter_non_pain_items(items)
+
+        assert [item["title"] for item in kept] == [
+            "Direct", "Missing", "Broken", "Need",
+        ]
+        assert all("evidence_type" not in item for item in kept)
+        assert stats["kept"] == 4
+        assert stats["dropped"] == 2
+        assert stats["dropped_by_evidence_type"] == {
+            "joke_meme_sarcasm": 1,
+            "self_promotion_showcase": 1,
+        }
+        assert stats["dropped_items"] == [
+            {
+                "evidence_type": "joke_meme_sarcasm",
+                "post_id": 1,
+                "comment_id": None,
+                "title": "Joke",
+                "quoted_text": "some phrase",
+            },
+            {
+                "evidence_type": "self_promotion_showcase",
+                "post_id": 1,
+                "comment_id": None,
+                "title": "Pitch",
+                "quoted_text": "some phrase",
+            },
+        ]
+
+    def test_missing_or_unknown_evidence_type_fails_closed(self):
+        items = [
+            _item(title="Missing"),
+            _item(title="Unknown", evidence_type="maybe_pain"),
+        ]
+
+        kept, stats = filter_non_pain_items(items)
+
+        assert kept == []
+        assert stats["kept"] == 0
+        assert stats["dropped"] == 2
+        assert stats["dropped_by_evidence_type"] == {"unknown": 2}
+        assert [item["title"] for item in stats["dropped_items"]] == [
+            "Missing", "Unknown",
+        ]
 
 
 # ===========================================================================
@@ -153,6 +237,7 @@ class TestExtractFromPosts:
                  "severity": 5,
                  "quoted_text": "test phrase",
                  "category_name": "Uncategorized",
+                 "evidence_type": "direct_complaint",
                  "post_id": pid,
                  "comment_id": None}
                 for pid in ids
@@ -183,6 +268,7 @@ class TestExtractFromPosts:
         assert {it["post_id"] for it in items} == {1, 2}
         assert all(1 <= it["severity"] <= 10 for it in items)
         assert all(it["category_name"] == "Uncategorized" for it in items)
+        assert all("evidence_type" not in it for it in items)
 
     def test_missing_comments_key_ok(self, monkeypatch):
         """Caller passes a post dict without a ``comments`` key — must

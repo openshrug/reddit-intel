@@ -8,9 +8,10 @@ Main flow:
    comment IDs for the LLM.
 3. Ask the LLM to emit structured pending painpoints against the category
    taxonomy.
-4. Postprocess each row's quote evidence via `painpoint_extraction.postprocess`
+4. Drop rows whose evidence type is not an explicit pain signal.
+5. Postprocess each row's quote evidence via `painpoint_extraction.postprocess`
    so only source-faithful `quoted_text` values continue.
-5. Persist verified rows as pending_painpoints, using embedding dedup to link
+6. Persist verified rows as pending_painpoints, using embedding dedup to link
    near-duplicate observations as extra sources.
 
     await extract_painpoints([1, 2, 3])
@@ -27,6 +28,7 @@ from db.embeddings import OpenAIEmbedder
 from db.painpoints import save_pending_painpoints_batch
 from db.posts import get_comments_for_post, get_posts_by_ids
 from llm import OPENAI_COMPLETION_CONCURRENCY, TokenCounter, get_client, llm_call
+from painpoint_extraction.evidence_filter import EvidenceType, filter_non_pain_items
 from painpoint_extraction.postprocess import postprocess_painpoints
 
 log = logging.getLogger(__name__)
@@ -49,6 +51,7 @@ class ExtractedPainpoint(BaseModel):
     severity: int = Field(ge=1, le=10, description="1 = trivial inconvenience, 3 = recurring annoyance, 5 = significant friction affecting routine, 7 = major disruption or emotional distress, 10 = totally blocking")
     quoted_text: str = Field(description="Short phrase or clause copied verbatim from one source post or comment; keep it under one sentence")
     category_name: str = Field(description="Must match a category from the taxonomy, or 'Uncategorized'")
+    evidence_type: EvidenceType = Field(description="Classify the evidence behind this specific candidate. Use an explicit-pain label only when the source states real friction; use a non-pain label when the candidate is inferred from format, praise, commentary, or topic alone. If a showcase post contains a concrete first-person pain that motivated the build, label by the pain type rather than self_promotion_showcase.")
     post_id: int = Field(description="The [Post N] ID from the input")
     comment_id: int | None = Field(default=None, description="The [Comment N] ID, or null if from the post body")
 
@@ -72,11 +75,9 @@ tracker, social tool, or consumer utility all count.
 - SPECIFIC: a concrete friction, missing feature, broken experience, or \
 unmet need — not a vague opinion or abstract commentary.
 
-Bias toward KEEPING painpoints with viral / mass-market potential: \
-consumer frustrations, social/dating/relationship friction that a product \
-could ease, lifestyle and habit pains, creator/marketing workflow \
-struggles, etc. Non-technical pains are welcome if a product could \
-address them.
+Prefer broadly useful consumer or workflow pains, but only when the \
+source explicitly describes real friction. Do not invent a product need \
+from vibes, jokes, praise, or commentary.
 
 Skip painpoints that are:
 - Pure opinions, memes, jokes, or sarcasm with no real pain behind them.
@@ -84,9 +85,18 @@ Skip painpoints that are:
 jobs", "society is broken").
 - Company drama / platform politics with no product angle.
 
+Borderline cases:
+- Jokes/memes/sarcasm, praise, self-promo / show-and-tell, thought \
+leadership, policy / news / grief, and "drop your product" / "what are \
+you building" threads can still contain real pain. Extract only when \
+this specific candidate is grounded in explicit friction stated by the \
+source — otherwise skip it.
+
 Rules:
 - A single post/comment may contain zero, one, or many painpoints.
 - Different comments on the same post may yield different painpoints.
+- Extract only pains directly stated by the source speaker or clearly \
+grounded in their own described friction.
 - quoted_text must be copied verbatim from one source post or comment. \
 Prefer a short phrase; a short clause is okay when needed, but keep it \
 under one sentence. Do not paraphrase, stitch together separate phrases, \
@@ -249,15 +259,23 @@ async def _process_batch(batch_idx, total, batch, client, instructions, sem, cou
             return []
 
         items = [pp.model_dump() for pp in result.painpoints]
-        items, stats = postprocess_painpoints(items, batch)
+        items, evidence_stats = filter_non_pain_items(items)
+        items, quote_stats = postprocess_painpoints(items, batch)
         log.info(
             "extract: batch %d/%d -> %d painpoints kept "
-            "(%d attribution fixes, %d fuzzy quote repairs, "
+            "(%d evidence drops by type: %s; "
+            "%d attribution fixes, %d fuzzy quote repairs, "
             "%d numeric/entity repairs, %d quote drops)",
-            batch_idx + 1, total, stats["kept"], stats["attribution_fixed"],
-            stats["fuzzy_repaired"], stats["numeric_entity_repaired"],
-            stats["dropped"],
+            batch_idx + 1, total, quote_stats["kept"],
+            evidence_stats["dropped"],
+            evidence_stats["dropped_by_evidence_type"],
+            quote_stats["attribution_fixed"],
+            quote_stats["fuzzy_repaired"],
+            quote_stats["numeric_entity_repaired"],
+            quote_stats["dropped"],
         )
+        for dropped in evidence_stats["dropped_items"]:
+            log.debug("extract: evidence filter dropped %s", dropped)
         return items
 
 
