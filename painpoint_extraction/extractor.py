@@ -43,12 +43,54 @@ BATCH_TOKEN_BUDGET = 2_000
 EXTRACTION_BATCH_CONCURRENCY = OPENAI_COMPLETION_CONCURRENCY
 
 
+# --- Severity rubric (per-model) ---
+#
+# Models calibrate the 1-10 severity scale very differently. The terse rubric
+# is what gpt-5-nano was tuned against and matches its output distribution
+# (mean ~4.8, max 7, useful spread across 3-7). The anchored rubric is needed
+# for gpt-5.4-nano, which under the terse rubric ceiling-pins to 7-10 for any
+# specific pain (see selfhosted_20260502 A/B).
+#
+# Sharing the anchored rubric across both models was tried first — it pulled
+# gpt-5-nano upward by +1 mean severity and added sev=8/9 emissions it never
+# made before, so we branch by model. Each rubric is the contract its model
+# was last validated against; touching either should be paired with a re-run.
+
+_TERSE_SEVERITY_RUBRIC = (
+    "1 = trivial inconvenience, 3 = recurring annoyance, "
+    "5 = significant friction affecting routine, "
+    "7 = major disruption or emotional distress, 10 = totally blocking"
+)
+
+_ANCHORED_SEVERITY_RUBRIC = (
+    "1 = trivial inconvenience the user can ignore (cosmetic gripe). "
+    "3 = recurring annoyance the user works around (cumbersome UI). "
+    "5 = significant friction affecting routine (broken search, missing feature). "
+    "7 = major disruption: user actively considering switching tools, "
+    "or pain blocks part of their work (frequent crashes, data-loss risk). "
+    "10 = totally blocking with no workaround: user cannot complete the "
+    "task at all (service permanently down, vault lost forever). "
+    "Past-tense post-mortems get the severity the pain WAS, not severity-now "
+    "(typically 5-7). "
+    "Hypothetical or third-party warnings (CVE awareness, news coverage) "
+    "are 3-5, not 8+. "
+    "Feature wishes with no described current pain are 3-4."
+)
+
+
+def _severity_rubric(model: str) -> str:
+    """Pick the rubric a given model was last validated against."""
+    if model.startswith("gpt-5.4"):
+        return _ANCHORED_SEVERITY_RUBRIC
+    return _TERSE_SEVERITY_RUBRIC
+
+
 # --- Structured output schema ---
 
 class ExtractedPainpoint(BaseModel):
     title: str = Field(description="Concise name revealing the essence of the pain")
     description: str = Field(description="1-2 sentence explanation of the pain")
-    severity: int = Field(ge=1, le=10, description="1 = trivial inconvenience, 3 = recurring annoyance, 5 = significant friction affecting routine, 7 = major disruption or emotional distress, 10 = totally blocking")
+    severity: int = Field(ge=1, le=10, description=_severity_rubric(MODEL))
     quoted_text: str = Field(description="Short phrase or clause copied verbatim from one source post or comment; keep it under one sentence")
     category_name: str = Field(description="Must match a category from the taxonomy, or 'Uncategorized'")
     evidence_type: EvidenceType = Field(description="Classify the evidence behind this specific candidate. Use an explicit-pain label only when the source states real friction; use a non-pain label when the candidate is inferred from format, praise, commentary, or topic alone. If a showcase post contains a concrete first-person pain that motivated the build, label by the pain type rather than self_promotion_showcase.")
