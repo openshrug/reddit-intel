@@ -1,7 +1,7 @@
 """Hermetic tests for the painpoint_extraction package.
 
 Covers:
-- _fix_attribution: exact substring re-attribution logic (unit tests)
+- postprocess_painpoints: quote faithfulness + attribution repair (unit tests)
 - extract_painpoints_from_posts: pure dict-in / dict-out contract with
   stubbed llm_call (no API key required)
 
@@ -12,7 +12,7 @@ Run with:  pytest tests/test_extraction.py -v
 
 import asyncio
 
-from painpoint_extraction.extractor import _fix_attribution
+from painpoint_extraction.postprocess import postprocess_painpoints
 
 # ===========================================================================
 # Helpers
@@ -41,67 +41,90 @@ def _item(post_id=1, comment_id=None, quoted_text="some phrase", title="Pain",
 
 
 # ===========================================================================
-# _fix_attribution — unit tests
+# postprocess_painpoints — unit tests
 # ===========================================================================
 
 
-class TestFixAttribution:
-    def test_correct_attribution_unchanged(self):
-        post = _post(selftext="the post body has some phrase in it")
-        items = [_item(post_id=1, comment_id=None, quoted_text="some phrase")]
-        assert _fix_attribution(items, [(post, [])]) == 0
-        assert items[0]["comment_id"] is None
+class TestPostprocessPainpoints:
+    def test_exact_keep_allows_long_quote(self):
+        quote = "When I try to enter a value in a cell"
+        post = _post(selftext=f"Notion is slow. {quote}, I wait.")
+        items = [_item(post_id=1, comment_id=None, quoted_text=quote)]
 
-    def test_fixes_wrong_comment_to_post_body(self):
-        post = _post(selftext="the post body has key phrase in it")
-        comment = _comment(id=100, body="unrelated comment")
-        items = [_item(post_id=1, comment_id=100, quoted_text="key phrase")]
+        kept, stats = postprocess_painpoints(items, [(post, [])])
 
-        assert _fix_attribution(items, [(post, [comment])]) == 1
-        assert items[0]["comment_id"] is None
+        assert kept[0]["quoted_text"] == quote
+        assert kept[0]["comment_id"] is None
+        assert stats["kept"] == 1
+        assert stats["dropped"] == 0
 
-    def test_fixes_post_body_to_comment(self):
+    def test_repairs_comment_attribution(self):
         post = _post(selftext="nothing relevant here")
-        comment = _comment(id=200, body="this comment has the key phrase")
-        items = [_item(post_id=1, comment_id=None, quoted_text="key phrase")]
-
-        assert _fix_attribution(items, [(post, [comment])]) == 1
-        assert items[0]["comment_id"] == 200
-
-    def test_fixes_wrong_comment_to_correct_comment(self):
-        post = _post(selftext="nothing here")
         c1 = _comment(id=100, body="wrong comment")
         c2 = _comment(id=200, body="correct comment with target words")
         items = [_item(post_id=1, comment_id=100, quoted_text="target words")]
 
-        assert _fix_attribution(items, [(post, [c1, c2])]) == 1
-        assert items[0]["comment_id"] == 200
+        kept, stats = postprocess_painpoints(items, [(post, [c1, c2])])
 
-    def test_prefers_current_when_multiple_matches(self):
-        post = _post(selftext="shared words appear here too")
-        comment = _comment(id=100, body="shared words in comment")
-        items = [_item(post_id=1, comment_id=100, quoted_text="shared words")]
+        assert kept[0]["comment_id"] == 200
+        assert stats["attribution_fixed"] == 1
 
-        assert _fix_attribution(items, [(post, [comment])]) == 0
-        assert items[0]["comment_id"] == 100
+    def test_fuzzy_repairs_quote_and_numeric_value_from_source(self):
+        source = "no single client should be more than 25% of revenue"
+        post = _post(selftext=source)
+        items = [_item(
+            post_id=1,
+            quoted_text="no single client should be more than 30% of revenue",
+        )]
 
-    def test_swaps_both_directions_in_same_batch(self):
-        post = _post(id=1, selftext="post has alpha phrase")
-        c1 = _comment(id=100, body="comment has beta phrase")
+        kept, stats = postprocess_painpoints(items, [(post, [])])
+
+        assert kept[0]["quoted_text"] == source
+        assert stats["fuzzy_repaired"] == 1
+        assert stats["numeric_entity_repaired"] == 1
+
+    def test_drops_invalid_or_stitched_quote(self):
+        post = _post(selftext="alpha phrase is here. omega phrase is elsewhere.")
+        items = [_item(post_id=1, quoted_text="alpha phrase... omega phrase")]
+
+        kept, stats = postprocess_painpoints(items, [(post, [])])
+
+        assert kept == []
+        assert stats["dropped"] == 1
+
+    def test_drops_ambiguous_fuzzy_match(self):
+        post = _post(
+            selftext=(
+                "alpha beta gamma meta. "
+                "alpha beta gamma beta."
+            )
+        )
+        items = [_item(post_id=1, quoted_text="alpha beta gamma zeta")]
+
+        kept, stats = postprocess_painpoints(items, [(post, [])])
+
+        assert kept == []
+        assert stats["dropped"] == 1
+
+    def test_reports_batch_counters(self):
+        post = _post(selftext="source quote one. source quote three")
+        c1 = _comment(id=100, body="source quote two")
         items = [
-            _item(post_id=1, comment_id=100, quoted_text="alpha phrase"),
-            _item(post_id=1, comment_id=None, quoted_text="beta phrase"),
+            _item(post_id=1, quoted_text="source quote one"),
+            _item(post_id=1, comment_id=None, quoted_text="source quote two"),
+            _item(post_id=1, quoted_text="missing quote"),
         ]
 
-        assert _fix_attribution(items, [(post, [c1])]) == 2
-        assert items[0]["comment_id"] is None
-        assert items[1]["comment_id"] == 100
+        kept, stats = postprocess_painpoints(items, [(post, [c1])])
 
-    def test_no_crash_on_empty_or_missing_quote(self):
-        batch = [(_post(), [_comment()])]
-        assert _fix_attribution([], batch) == 0
-        assert _fix_attribution([_item(quoted_text="")], batch) == 0
-        assert _fix_attribution([_item(quoted_text="hallucinated")], batch) == 0
+        assert len(kept) == 2
+        assert stats == {
+            "kept": 2,
+            "attribution_fixed": 1,
+            "fuzzy_repaired": 0,
+            "numeric_entity_repaired": 0,
+            "dropped": 1,
+        }
 
 
 # ===========================================================================
@@ -149,10 +172,10 @@ class TestExtractFromPosts:
         self._stub_llm_call(monkeypatch)
 
         posts = [
-            {"id": 1, "title": "Alpha", "selftext": "alpha body",
+            {"id": 1, "title": "Alpha", "selftext": "alpha body test phrase",
              "subreddit": "test", "score": 10, "num_comments": 2,
              "comments": [{"id": 10, "body": "comment body", "score": 3}]},
-            {"id": 2, "title": "Beta", "selftext": "beta body",
+            {"id": 2, "title": "Beta", "selftext": "beta body test phrase",
              "subreddit": "test", "score": 8, "num_comments": 0,
              "comments": []},
         ]
@@ -168,7 +191,8 @@ class TestExtractFromPosts:
         from painpoint_extraction import extract_painpoints_from_posts
         self._stub_llm_call(monkeypatch)
 
-        posts = [{"id": 99, "title": "t", "selftext": "b", "subreddit": "s",
+        posts = [{"id": 99, "title": "t", "selftext": "test phrase",
+                  "subreddit": "s",
                   "score": 1, "num_comments": 0}]
         items, _ = asyncio.run(extract_painpoints_from_posts(posts, []))
         assert len(items) == 1

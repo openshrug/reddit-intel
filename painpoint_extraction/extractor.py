@@ -1,6 +1,17 @@
 """
-Painpoint extraction — batch posts from the DB, send to an LLM with the
-category taxonomy, and save extracted painpoints as pending_painpoints.
+Painpoint extraction.
+
+Main flow:
+1. Load posts and comments from SQLite, or accept caller-provided
+   posts-with-comments for the pure in-memory API.
+2. Build token-budgeted batches and render each batch with stable post /
+   comment IDs for the LLM.
+3. Ask the LLM to emit structured pending painpoints against the category
+   taxonomy.
+4. Postprocess each row's quote evidence via `painpoint_extraction.postprocess`
+   so only source-faithful `quoted_text` values continue.
+5. Persist verified rows as pending_painpoints, using embedding dedup to link
+   near-duplicate observations as extra sources.
 
     await extract_painpoints([1, 2, 3])
 """
@@ -16,6 +27,7 @@ from db.embeddings import OpenAIEmbedder
 from db.painpoints import save_pending_painpoints_batch
 from db.posts import get_comments_for_post, get_posts_by_ids
 from llm import TokenCounter, get_client, llm_call
+from painpoint_extraction.postprocess import postprocess_painpoints
 
 log = logging.getLogger(__name__)
 
@@ -23,7 +35,7 @@ log = logging.getLogger(__name__)
 MODEL = "gpt-5-nano"
 REASONING_EFFORT = "low"
 BATCH_TOKEN_BUDGET = 2_000
-LLM_CONCURRENCY = 40
+LLM_CONCURRENCY = 20
 
 
 # --- Structured output schema ---
@@ -32,7 +44,7 @@ class ExtractedPainpoint(BaseModel):
     title: str = Field(description="Concise name revealing the essence of the pain")
     description: str = Field(description="1-2 sentence explanation of the pain")
     severity: int = Field(ge=1, le=10, description="1 = trivial inconvenience, 3 = recurring annoyance, 5 = significant friction affecting routine, 7 = major disruption or emotional distress, 10 = totally blocking")
-    quoted_text: str = Field(description="Brief key phrase (under 5 words) copied verbatim from the source post or comment that anchors this painpoint")
+    quoted_text: str = Field(description="Short phrase or clause copied verbatim from one source post or comment; keep it under one sentence")
     category_name: str = Field(description="Must match a category from the taxonomy, or 'Uncategorized'")
     post_id: int = Field(description="The [Post N] ID from the input")
     comment_id: int | None = Field(default=None, description="The [Comment N] ID, or null if from the post body")
@@ -72,8 +84,10 @@ jobs", "society is broken").
 Rules:
 - A single post/comment may contain zero, one, or many painpoints.
 - Different comments on the same post may yield different painpoints.
-- quoted_text must be a brief key phrase (under 5 words) copied verbatim \
-from the source — pick the most distinctive words that anchor this painpoint.
+- quoted_text must be copied verbatim from one source post or comment. \
+Prefer a short phrase; a short clause is okay when needed, but keep it \
+under one sentence. Do not paraphrase, stitch together separate phrases, \
+or change numbers.
 - If no category fits well, use "Uncategorized".
 
 ## Category taxonomy
@@ -214,7 +228,7 @@ async def extract_painpoints(post_ids, *, batch_token_budget=BATCH_TOKEN_BUDGET)
 # ============================================================
 
 async def _process_batch(batch_idx, total, batch, client, instructions, sem, counter):
-    """LLM extract -> fix attribution -> return corrected painpoint dicts."""
+    """LLM extract -> validate source evidence -> return corrected rows."""
     async with sem:
         batch_text = _format_batch(batch)
         log.info("extract: batch %d/%d (%d posts)",
@@ -232,57 +246,16 @@ async def _process_batch(batch_idx, total, batch, client, instructions, sem, cou
             return []
 
         items = [pp.model_dump() for pp in result.painpoints]
-        fixed = _fix_attribution(items, batch)
-        log.info("extract: batch %d/%d -> %d painpoints (%d attribution fixes)",
-                 batch_idx + 1, total, len(items), fixed)
+        items, stats = postprocess_painpoints(items, batch)
+        log.info(
+            "extract: batch %d/%d -> %d painpoints kept "
+            "(%d attribution fixes, %d fuzzy quote repairs, "
+            "%d numeric/entity repairs, %d quote drops)",
+            batch_idx + 1, total, stats["kept"], stats["attribution_fixed"],
+            stats["fuzzy_repaired"], stats["numeric_entity_repaired"],
+            stats["dropped"],
+        )
         return items
-
-
-def _fix_attribution(items, batch):
-    """Fix comment_id attribution by searching quoted_text in source material.
-
-    Operates in-place on the items list. Returns count of fixes applied.
-    """
-    source_lookup = {}
-    for post, comments in batch:
-        post_text = (
-            (post.get("title") or "") + " " + (post.get("selftext") or "")
-        ).lower()
-        comment_entries = [
-            (c["id"], (c.get("body") or "").lower()) for c in comments
-        ]
-        source_lookup[post["id"]] = (post_text, comment_entries)
-
-    fixed = 0
-    for item in items:
-        quote = (item.get("quoted_text") or "").lower().strip()
-        if not quote:
-            continue
-
-        sources = source_lookup.get(item["post_id"])
-        if not sources:
-            continue
-
-        post_text, comment_entries = sources
-
-        matches = []
-        if quote in post_text:
-            matches.append(None)  # None = post body
-        for cid, cbody in comment_entries:
-            if quote in cbody:
-                matches.append(cid)
-
-        if not matches:
-            continue
-
-        current = item.get("comment_id")
-        if current in matches:
-            continue
-
-        item["comment_id"] = matches[0]
-        fixed += 1
-
-    return fixed
 
 
 # ============================================================
