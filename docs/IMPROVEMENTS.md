@@ -167,4 +167,126 @@ If we end up touching this layer, two adjacent improvements ride free:
 
 ---
 
+## `evaluation/agentic_eval/miners/` — per-snapshot automated failure-mode miners
+
+### Status
+
+**Deferred** until we have 4-5 reports across the new builder-validation corpora (Show-and-tell / Consumer-lifestyle / Vertical-professional / Existing-tool feedback) and can see which qualitative findings recur cross-corpus. Today we only have one report (`evaluation/agentic_eval/snapshots/openclaw_claudeai_sideproject/report.md`); building 8 detectors against one report risks shipping miners for openclaw-specific quirks.
+
+### Why deferred
+
+The cost of having a human evaluator agent re-derive findings per run is one wall-clock hour, not a permanent loss of signal — `dump.md` and `metrics.json` already do most of the grounding. The miners are an optimization on top, and optimizing prematurely against a one-corpus sample biases the detector thresholds to that corpus.
+
+### Trigger to revisit
+
+Build it when **any one** of the following holds after the new agentic_eval runs land:
+
+- 3+ reports surface the same failure mode (mega-merge, polarity-flip, quoted_text mismatch, sweep rubber-stamp, dumping-ground leaf, low-margin reroute, sibling near-duplicate, recall hole) — that's the threshold past which mechanical detection saves real time.
+- Engine code in `db/embeddings.py` or `category_worker.py` changes; we need automated regression coverage to know whether the change quietly broke a previously-clean corpus.
+- We move agentic_eval from ad-hoc invocation to a CI cadence (e.g. weekly) — at that point manual re-derivation is no longer free.
+
+### Sketch
+
+New package `evaluation/agentic_eval/miners/`, one module per finding, each exposing `def run(snapshot_path: Path) -> dict`. New `miners/__init__.py` aggregates via `run_all(snapshot_path)` returning a dict, written next to `dump.md` / `metrics.json` as `findings.json` by `snapshot.take()`.
+
+Concrete miners (each maps 1:1 to a finding from today's `report.md`, so the existing prose is the spec):
+
+- `quoted_text_mismatch.py` — for every pending, check `quoted_text in (post_title || selftext)` when `comment_id IS NULL`, else in `comment_body`. Recommendation #3 made mechanical. Today: pending #426, #298, #425.
+- `mega_merge_detector.py` — for every painpoint with `signal_count >= 8` compute pairwise cosine across linked pendings (reuse `evaluation/painpoints_eval/mega_merge_stress.py`'s `_fetch_pendings` + `cluster_at`); flag if `min_pairwise_cos < 0.45` or `n_components_at_0.65 > 1`. Today: pp #48 sig=20.
+- `polarity_flip.py` — batched LLM polarity classifier on multi-source painpoints; flag mixed-polarity clusters. Today: pp #81 (no-code "works" vs "barrier"). ~$0.001/painpoint, cap to top 50.
+- `sweep_rubber_stamp.py` — group `category_events` by event_type; flag any with `accept_rate == 1.0 AND proposed >= 10`. Today: 158/158 acceptance.
+- `low_margin_reroute.py` — bucket reroute margins; list every painpoint moved with margin < 0.15. Today: events 51/53/136/153 → cat 326 dumping ground.
+- `sibling_distinctness.py` — pairwise cosine of children's centroid embeddings per parent; flag pairs > 0.85. Today: cats #322/#323/#324 vs seed #50.
+- `empty_or_dumping_leaves.py` — flag `direct_painpoints == 0` and `mean_intra_cos < 0.55 AND direct_painpoints >= 5`. Today: cat #319 (empty) and cat #326 (dumping).
+- `recall_holes.py` — per subreddit `pendings_per_post` z-score; flag > 1.5σ below the run's median. Today: ClaudeAI 0.54 vs openclaw 1.12 (TPM rate-limit drops).
+
+Wire-in: extend `snapshot.take()` to call `miners.run_all(snap_db)` and write `findings.json`. Extend `instructions/00_protocol.md` §3 to list `findings.json` as the third input alongside `dump.md` / `metrics.json`.
+
+### Estimated work
+
+~3-4 days. ~80-150 LOC per miner, ~400 LOC tests, ~100 LOC orchestration + protocol updates. `polarity_flip` is the only one that adds OpenAI cost; the rest are pure SQL + cosine math.
+
+### What to do first when you pick this up
+
+Re-read all available `report.md` files and rank findings by recurrence count. Implement miners in descending order of recurrence; ship after the first 2-3 even if the others remain on this list.
+
+---
+
+## `evaluation/category_eval/` — quantitative harness for Dim 4
+
+### Status
+
+**Deferred.** The slot is reserved in `evaluation/README.md` and the rationale is documented; standing it up needs the per-snapshot miners (above) to provide its ground truth and at least 3-4 reports to seed its fixtures.
+
+### Why deferred
+
+Dim 4 in the existing report scored 3/5 (mixed); Dim 3 (mega-merge / polarity flip) scored 2/5 (fail) and `painpoints_eval/` already covers Dim 3 quantitatively. The marginal next dollar of eval investment goes further on Dim 3 fixtures than on standing up a new sibling. Once the painpoints_eval coverage is wide enough that Dim 3 is locked in, Dim 4 becomes the next constraint.
+
+The fixture work also requires gold examples lifted from multiple reports to be comprehensive — building them off one report's findings would over-fit to the 23 runtime cats in the openclaw/ClaudeAI/SideProject taxonomy.
+
+### Trigger to revisit
+
+- 3+ reports show recurring Dim 4 failures (sibling near-duplicates, dumping-ground leaves, low-margin reroutes, sweep rubber-stamping).
+- `category_worker.py` is being actively modified; quantitative regression coverage on category placement becomes essential.
+- The runtime taxonomy grows past ~50 runtime cats and visual review of `dump.md §5` no longer scales.
+
+### Sketch
+
+New package `evaluation/category_eval/` matching the shape of `painpoints_eval/`:
+
+- `README.md` + `SEEDING.md` — own protocol; the fixture shape differs from `painpoints_eval/` (tuples + LLM-judge replays, not pair-cosines).
+- `tree_quality.py` — given a snapshot, emit per-leaf coherence (mean intra-cluster cosine), sibling distinctness, empty leaves, dumping-ground leaves, runtime-vs-seed ratio. Mostly a thin wrapper over the per-snapshot miners — but presented as a single category-level scorecard.
+- `proposer_judge_calibration.py` — replays `category_events` rows through a fresh LLM judge (different model than the proposer) and computes Cohen's κ between the live judge and the fresh one. Surfaces the rubber-stamp problem with a number, not just a 158/158 anecdote. Per-event-type κ for `add_category_split`, `painpoint_merge`, `reroute_painpoint`, `delete_category`.
+- `fixtures/sibling_pairs.yaml` — gold "should merge" / "should stay separate" sibling category pairs. Seed from cats #322/#323/#324 (should merge into seed #50) plus clearly-distinct sibling pairs as keep-separate negatives. Schema mirrors painpoints_eval YAML; label = `merge` / `keep_separate`.
+- `fixtures/placement_pairs.yaml` — gold "(painpoint, category) is correct" pairs. Seed from pp #381 alarm clock under `Sleep & Recovery` (correct) vs `Platform and Abuse Management` (wrong); pp #362 typing extension under `Productivity & Workflow` (correct) vs cat 326 (wrong).
+- Per the **Promotion rule** in `evaluation/README.md`, `cosine_sim` (currently in `evaluation/painpoints_eval/_util.py`) graduates to `evaluation/shared/cosine.py` when this package actually uses it. Both consumers update at that move.
+
+### Estimated work
+
+~2-3 days. ~600 LOC including fixtures, ~250 LOC tests.
+
+---
+
+## Cross-run aggregator + committed baselines for `evaluation/`
+
+### Status
+
+**Deferred.** With one historical run today and four arriving in the next sprint, aggregation has limited signal yet — it pays off once we have 5+ runs and can detect recurring vs one-off findings.
+
+### Why deferred
+
+Aggregating across 5 runs gives much better signal than aggregating across 2; the inflection point lands right after the breadth-corpus runs do. Locking in baselines before deciding which per-snapshot miners we're building is also premature — the baseline shape depends on the miner output.
+
+### Trigger to revisit
+
+- 5+ reports exist (likely one sprint after the breadth runs land).
+- Engine code starts changing more than weekly; we need a way to attribute "which dimension got better/worse" to a specific commit.
+- Threshold tuning lands (`MERGE_COSINE_THRESHOLD` raise from 0.60 → ~0.70 per Recommendation #1 in today's report) — we need before/after numbers to defend the change.
+
+### Sketch
+
+- `evaluation/aggregate.py` — walks `evaluation/agentic_eval/runs/*/`, parses each `report.md` summary table + each `*/findings.json` (when miners exist), emits `evaluation/dashboard.md` with:
+  - per-dimension score timeline (1 row per run, 4 columns)
+  - per-failure-mode counts across runs (depends on miners landing)
+  - per-subreddit difficulty (mean Dim 1 score across runs that used each subreddit)
+  - recommendation recurrence (hash each `report.md` recommendation; mark recurring vs resolved)
+- Lock today's `runs/pair_eval_painpoint_merge_pairs_20260419-233514.json` and `runs/threshold_sweep_painpoint_merge_pairs_20260419-233526.csv` as `evaluation/painpoints_eval/baselines/` (commit them — they are tiny and pin today's behaviour).
+- `evaluation/painpoints_eval/compare_baseline.py` — diff latest pair_eval JSON vs. baseline; non-zero exit on regressions (per-pair: was TP, now FN, etc.).
+- Same shape for `evaluation/agentic_eval/compare_baseline.py` once miners exist.
+
+### Estimated work
+
+~1-2 days. Largely glue code over JSON outputs that already exist (or will, once miners land).
+
+### What already exists for cross-run comparison
+
+The pairwise A/B comparison primitive landed early (out of order from this entry's plan) because the `evidence_filter` change needed it:
+
+- `evaluation/agentic_eval/inspect_db.cross_run_pending_diff(snapshot_a_db, snapshot_b_db)` — joins two run snapshots by Reddit identity (`post.permalink`, `comment.permalink`) so synthetic row IDs renumbering between runs doesn't break the join. Returns `{common, only_a, only_b}`.
+- `evaluation/agentic_eval/compare_runs.py` — CLI driver that emits a markdown report with headline metric deltas, cell-level overview, side-by-side render of changed common cells (sorted by |Δseverity|), and dropped/added pending tables sorted by severity.
+
+When the aggregator/baseline work above lands, both should reuse `cross_run_pending_diff` rather than re-deriving the join.
+
+---
+
 <!-- Append future deferred-work entries above this line, newest first -->

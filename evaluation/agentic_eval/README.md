@@ -18,7 +18,9 @@ utilities.
 evaluation/agentic_eval/
     run_pipeline.py     # entry point: clean-DB run + snapshots
     snapshot.py         # checkpoint + copy trends.db, render dump + metrics
-    inspect_db.py       # open_snapshot() ctx manager + 4 gap-filling helpers
+    inspect_db.py       # open_snapshot() ctx manager + 5 gap-filling helpers
+                        # (incl. cross_run_pending_diff for A/B comparisons)
+    compare_runs.py     # CLI driver: markdown A/B report between two runs
     dump.py             # per-snapshot markdown generator
     metrics.py          # per-snapshot JSON metrics + cross-snapshot deltas
     instructions/       # one file per concern, evaluator agent reads these
@@ -31,6 +33,7 @@ evaluation/agentic_eval/
     README.md           # this file
     runs/               # output dir (gitignored), one subdir per invocation
         <sub1>_<sub2>_..._<YYYYMMDD-HHMMSS>/
+            trends.db   # working DB for this run -- workstation DB is untouched
             00_clean/
             01_<sub1>/
             02_<sub2>/
@@ -74,20 +77,60 @@ Other flags:
 
 | Flag | Default | Effect |
 | --- | --- | --- |
-| `--keep-existing-db` | off | Skip the `trends.db` wipe (resume against the live DB). A fresh run dir is still created so prior runs aren't touched. |
 | `--skip-sweep` | off | Stop after the last subreddit; don't run `category_worker.run_sweep` |
 | `--min-score N` | 0 | Forwarded to `scrape_subreddit_full` |
 | `--debug` | off | DEBUG-level logging |
 
 The chosen run directory is logged on the first INFO line (`Run dir: ...`)
-and again on completion (`Done. Snapshots in ...`).
+and again on completion (`Done. Snapshots in ...`). The pipeline's
+working `trends.db` lives **inside** that run dir (logged as
+`DB path for this run: ...`); the workstation's `reddit-intel/trends.db`
+is never read or written, so runs are safe to launch without backing
+anything up.
 
 **Cost / time**: a real run hits the live Reddit JSON endpoints, the
 OpenAI embeddings API, and `gpt-5-nano` / `gpt-4.1-mini` for extraction
 and naming. Expect ~3-10 min wall-clock and a few cents of OpenAI spend
 per subreddit (matches the figures in
-`tests/live/test_e2e_real_subreddits.py`). The clean wipe deletes the
-live `trends.db` -- back it up first if you need it.
+`tests/live/test_e2e_real_subreddits.py`).
+
+---
+
+## A/B-comparing two runs
+
+When you change the extraction prompt, the evidence filter, the LLM
+model, or any threshold that affects `pending_painpoints`, run the
+pipeline twice (once per side of the change) and diff the two run
+directories:
+
+```bash
+.venv/bin/python -m evaluation.agentic_eval.compare_runs \
+    evaluation/agentic_eval/runs/<baseline_run> \
+    evaluation/agentic_eval/runs/<new_run>
+```
+
+This writes
+`<new_run>/compare_<baseline>_vs_<new>.md` containing:
+
+- Headline metric deltas from both `metrics.json` files.
+- Cell-level overview: how many `pending_painpoints` rows are in
+  both runs, only in baseline (dropped), only in new (added).
+- Side-by-side render of OLD-vs-NEW for the most-changed common
+  cells (sorted by `|Δseverity|`).
+- Tables of dropped / added pendings sorted by severity.
+
+The cell-level join uses Reddit identity (`post.permalink`,
+`comment.permalink`) rather than synthetic row IDs, so it works
+across runs even though SQLite renumbers `id` columns per database.
+By default the comparison targets the last `NN_<label>` snapshot in
+each run (skipping `00_clean` and any `*_post_sweep`); pass
+`--snapshot 02_<sub>` to target a specific stage when both runs have
+the same multi-subreddit shape. `--all-common` renders every common
+cell; `--limit N` caps the side-by-side at N pairs (default 40).
+
+The underlying primitive is
+`inspect_db.cross_run_pending_diff(snap_a_db, snap_b_db)`, useful from
+a Python REPL or from inside a custom analysis script.
 
 ---
 

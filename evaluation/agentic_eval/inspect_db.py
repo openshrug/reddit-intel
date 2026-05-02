@@ -11,11 +11,15 @@ This module exposes:
 * ``open_snapshot(path)`` -- context manager that swaps ``db.DB_PATH``
   and restores it on exit (same trick the test suite uses, see
   ``tests/live/test_e2e_real_subreddits.py``).
-* Four small "gap-filling" helpers that the existing API doesn't cover:
+* Five small "gap-filling" helpers that the existing API doesn't cover:
     1. ``list_pending_painpoints_for_subreddit`` (raw pending side)
     2. ``list_pending_dedup_groups`` (PENDING_MERGE_THRESHOLD collapses)
     3. ``render_category_tree`` (recursive tree with member counts)
-    4. ``cross_snapshot_diff`` (deltas between two snapshots)
+    4. ``cross_snapshot_diff`` (deltas between two snapshots in the
+       same run)
+    5. ``cross_run_pending_diff`` (deltas between two independent
+       runs of the pipeline -- joins by Reddit permalink so synthetic
+       row IDs renumbering between runs doesn't matter)
 
 All other reads should call the existing ``db/queries.py`` helpers
 inside an ``open_snapshot`` block.
@@ -377,6 +381,125 @@ def cross_snapshot_diff(prev_path, cur_path):
         "max_prev_pending_id": max_prev_pending,
         "max_prev_painpoint_id": max_prev_painpoint,
     }
+
+
+# ---------------------------------------------------------------------------
+# (5) Cross-run pending diff -- compare two independent pipeline runs
+# ---------------------------------------------------------------------------
+
+def cross_run_pending_diff(snapshot_a_db, snapshot_b_db):
+    """Diff two independent pipeline runs (e.g. before vs after a prompt
+    change), joining pendings by Reddit identity rather than synthetic
+    row IDs.
+
+    The pending row IDs auto-increment per run, so they cannot be used
+    to match "the same observation" across runs. Reddit's
+    ``post.permalink`` (always populated) and ``comment.permalink``
+    (populated for any comment that came through the scraper) are the
+    stable identity. The cell-level key is
+    ``(post_permalink, comment_permalink or '__POST_BODY__')``.
+
+    Args:
+        snapshot_a_db: path to a snapshot's ``trends.db`` (commonly the
+            ``01_<sub>`` snapshot from the OLD run).
+        snapshot_b_db: same shape, NEW run.
+
+    Returns:
+        Dict with three lists::
+
+            {
+                "common": [(row_a, row_b), ...],   # same Reddit cell in both runs
+                "only_a": [row_a, ...],            # disappeared under run B
+                "only_b": [row_b, ...],            # newly emitted under run B
+            }
+
+        Each row is a dict with keys (consistent across both sides so
+        downstream renderers don't need to care which side they're on)::
+
+            pending_id, title, description, quoted_text, severity,
+            category_name, post_id, post_permalink, post_title,
+            subreddit, comment_id, comment_permalink, comment_body,
+            key   # the join key, useful for sorting / filtering
+
+        ``common`` pairs are sorted by ``post_permalink`` then
+        ``comment_permalink`` for stable iteration; ``only_a`` /
+        ``only_b`` are sorted by ``severity`` descending so the most
+        salient deltas come first.
+
+    Notes:
+        - Embedding-merged sources (``pending_painpoint_sources``) are
+          NOT walked here: this is intentionally a raw-pending diff,
+          since dedup behaviour itself is one of the things you're
+          usually trying to compare. If you need merge-side identity,
+          wrap this with ``list_pending_dedup_groups`` per side.
+        - Comments without a permalink (rare; some scraper paths leave
+          it null) fall through to the post-body bucket and may be
+          matched together. The helper logs a warning if it sees more
+          than one such comment per post; in practice this hasn't
+          fired against any real run.
+    """
+    rows_a = _load_pendings_with_identity(snapshot_a_db)
+    rows_b = _load_pendings_with_identity(snapshot_b_db)
+
+    by_key_a = {r["key"]: r for r in rows_a}
+    by_key_b = {r["key"]: r for r in rows_b}
+
+    common_keys = sorted(set(by_key_a) & set(by_key_b))
+    only_a_keys = sorted(set(by_key_a) - set(by_key_b))
+    only_b_keys = sorted(set(by_key_b) - set(by_key_a))
+
+    return {
+        "common": [(by_key_a[k], by_key_b[k]) for k in common_keys],
+        "only_a": sorted(
+            (by_key_a[k] for k in only_a_keys),
+            key=lambda r: -(r["severity"] or 0),
+        ),
+        "only_b": sorted(
+            (by_key_b[k] for k in only_b_keys),
+            key=lambda r: -(r["severity"] or 0),
+        ),
+    }
+
+
+def _load_pendings_with_identity(snapshot_db):
+    """Load every pending in the snapshot tagged with its Reddit-stable
+    identity. Internal helper for ``cross_run_pending_diff``."""
+    with open_snapshot(snapshot_db):
+        conn = db.get_db()
+        try:
+            rows = conn.execute(
+                """
+                SELECT
+                    pp.id            AS pending_id,
+                    pp.title,
+                    pp.description,
+                    pp.quoted_text,
+                    pp.severity,
+                    pp.category_id,
+                    cat.name         AS category_name,
+                    p.id             AS post_id,
+                    p.permalink      AS post_permalink,
+                    p.title          AS post_title,
+                    p.subreddit,
+                    pp.comment_id    AS comment_id,
+                    c.permalink      AS comment_permalink,
+                    c.body           AS comment_body
+                FROM pending_painpoints pp
+                JOIN posts p       ON p.id = pp.post_id
+                LEFT JOIN comments c   ON c.id = pp.comment_id
+                LEFT JOIN categories cat ON cat.id = pp.category_id
+                """
+            ).fetchall()
+        finally:
+            conn.close()
+
+    out = []
+    for r in rows:
+        d = dict(r)
+        comment_marker = d["comment_permalink"] or "__POST_BODY__"
+        d["key"] = (d["post_permalink"], comment_marker)
+        out.append(d)
+    return out
 
 
 # ---------------------------------------------------------------------------
