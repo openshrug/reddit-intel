@@ -26,7 +26,7 @@ from db.categories import get_category_list_flat
 from db.embeddings import OpenAIEmbedder
 from db.painpoints import save_pending_painpoints_batch
 from db.posts import get_comments_for_post, get_posts_by_ids
-from llm import TokenCounter, get_client, llm_call
+from llm import OPENAI_COMPLETION_CONCURRENCY, TokenCounter, get_client, llm_call
 from painpoint_extraction.postprocess import postprocess_painpoints
 
 log = logging.getLogger(__name__)
@@ -35,7 +35,10 @@ log = logging.getLogger(__name__)
 MODEL = "gpt-5-nano"
 REASONING_EFFORT = "low"
 BATCH_TOKEN_BUDGET = 2_000
-LLM_CONCURRENCY = 20
+# OpenAI request concurrency is enforced in llm.py. This semaphore only
+# prevents extractor batches from flooding asyncio.to_thread workers while
+# they wait on llm.py's shared completion semaphore.
+EXTRACTION_BATCH_CONCURRENCY = OPENAI_COMPLETION_CONCURRENCY
 
 
 # --- Structured output schema ---
@@ -149,7 +152,7 @@ async def extract_painpoints_from_posts(
 
     instructions = _build_instructions_from_categories(categories)
     client = get_client()
-    sem = asyncio.Semaphore(LLM_CONCURRENCY)
+    sem = asyncio.Semaphore(EXTRACTION_BATCH_CONCURRENCY)
     counter = TokenCounter()
 
     batch_results = await asyncio.gather(

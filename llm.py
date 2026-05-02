@@ -23,31 +23,23 @@ from db.queries import run_sql
 # Per-model concurrency caps. Phase 1 split (was a single 30-slot pool
 # shared across completions + embeddings).
 #
-# Embeddings get a much larger budget because text-embedding-3-small at
-# Tier 1 has ~5x the RPM and ~5x the TPM of gpt-5-nano, AND embedding
-# calls are typically <2s round-trip vs 5-15s for a reasoning completion
-# — so a single embedding batch holds its slot 5-10x less time than a
-# completion. Sharing the old 30-slot pool meant a fresh embedding call
-# could sit behind 30 in-flight completions for 10s+ even though its
-# own TPM bucket was 80% empty.
+# Embedding calls (text-embedding-3-small) are much faster and have higher rate limits than completions,
+# so they use a larger concurrency pool to avoid unnecessary bottlenecks.
 #
-# The completion bucket stays at 30 (sized for the sweep's uncat-review
+# The completion bucket stays at 20 (sized for the sweep's uncat-review
 # fan-out at ~2s per gpt-4.1-mini call ≈ 15 RPS, well under the
 # tier-1 RPM limit). Sleeps between retries happen OUTSIDE the semaphore
 # so backing-off threads don't starve fresh callers.
 #
 # Phase 2 (token-velocity tracker) is documented in
 # `docs/IMPROVEMENTS.md` and would subsume both knobs.
-OPENAI_COMPLETION_CONCURRENCY = 30
+OPENAI_COMPLETION_CONCURRENCY = 20
 OPENAI_EMBEDDING_CONCURRENCY = 80
 OPENAI_COMPLETION_SEMAPHORE = threading.BoundedSemaphore(OPENAI_COMPLETION_CONCURRENCY)
 OPENAI_EMBEDDING_SEMAPHORE = threading.BoundedSemaphore(OPENAI_EMBEDDING_CONCURRENCY)
 
-# Deprecated aliases kept for downstream consumers (`reddit-intel-closed`
-# imports `OPENAI_API_SEMAPHORE` to swap in a distributed implementation
-# at process boot — see PIPELINE.md §12). Both alias the COMPLETION
-# bucket because that's the throttled path historical callers were
-# trying to control. Will be removed in a future major bump once
+# Deprecated aliases kept for downstream consumers
+# Will be removed in a future major bump once
 # downstream migrates to the per-model names.
 OPENAI_CONCURRENCY = OPENAI_COMPLETION_CONCURRENCY
 OPENAI_API_SEMAPHORE = OPENAI_COMPLETION_SEMAPHORE
