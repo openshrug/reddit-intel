@@ -50,9 +50,10 @@ def test_brief_prompt_has_no_count_param(mcp_module):
         mcp_module.opportunity_brief(subreddit="smallbusiness", count=5)
 
 
-def test_brief_prompt_uses_default_limit_25(mcp_module):
+def test_brief_prompt_uses_brief_evidence_limit(mcp_module):
     body = mcp_module.opportunity_brief(subreddit="smallbusiness")
-    assert "limit=25" in body
+    expected = f"limit={mcp_module.opportunities.BRIEF_EVIDENCE_LIMIT}"
+    assert expected in body
 
 
 def test_triggers_appear_in_server_instructions_and_prompt(mcp_module):

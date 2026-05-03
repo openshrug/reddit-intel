@@ -173,7 +173,8 @@ prompt. The prompt is a thin launcher: it tells the agent to fetch
 `reddit-intel://opportunity-brief-template` (synthesis fields +
 conviction-tier rubric), and `reddit-intel://opportunity-brief-layout`
 (document skeleton, card markdown, and Cursor-canvas escape hatch), then
-call `get_opportunity_evidence(subreddit, limit=25)` for evidence. The agent
+call `get_opportunity_evidence(subreddit, limit=30)` for evidence (the value
+comes from `opportunities.BRIEF_EVIDENCE_LIMIT`). The agent
 classifies each evidence pack into highest / strong / exploratory conviction
 and surfaces the highest + strong tiers in the initial brief; exploratory
 candidates are held back unless you ask for more breadth. All workflow,

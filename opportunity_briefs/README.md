@@ -36,7 +36,7 @@ target number. The prompt is a thin launcher that:
 3. Tells the agent to fetch `reddit-intel://opportunity-brief-layout` and
    follow it for the document skeleton, per-opportunity card rendering,
    and the Cursor-canvas escape hatch.
-4. Tells the agent to call `get_opportunity_evidence(subreddit, limit=25)`
+4. Tells the agent to call `get_opportunity_evidence(subreddit, limit=30)` (the value comes from `opportunities.BRIEF_EVIDENCE_LIMIT`)
    for the evidence.
 
 The agent classifies each evidence pack into highest / strong / exploratory

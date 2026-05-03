@@ -142,7 +142,7 @@ def get_subreddit_summary(subreddit: str) -> dict:
 @mcp.tool
 def get_opportunity_evidence(
     subreddit: str,
-    limit: int = 10,
+    limit: int = opportunities.BRIEF_EVIDENCE_LIMIT,
     category: str | None = None,
 ) -> dict:
     """Ranked opportunity evidence packs for a subreddit: painpoints with
@@ -334,8 +334,8 @@ def opportunity_brief(subreddit: str) -> str:
         "3. Fetch reddit-intel://opportunity-brief-layout and follow it for "
         "the document skeleton, per-opportunity card rendering, and the "
         "Cursor-canvas escape hatch.\n"
-        f"4. Call get_opportunity_evidence(subreddit='{subreddit}', limit=25) "
-        "as the evidence API.\n"
+        f"4. Call get_opportunity_evidence(subreddit='{subreddit}', "
+        f"limit={opportunities.BRIEF_EVIDENCE_LIMIT}) as the evidence API.\n"
         "\n"
         "Do not restate the rules from the instructions resource, the field "
         "list from the template resource, or the layout from the layout "

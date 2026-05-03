@@ -89,6 +89,16 @@ def _fetch_candidates(conn, subreddit, *, limit, category=None):
         LEFT JOIN categories c ON c.id = p.category_id
         WHERE sr.subreddit = ?
         {category_filter}
+          AND EXISTS (
+              SELECT 1
+              FROM painpoint_sources ps_q
+              JOIN pending_painpoints pp_q
+                ON pp_q.id = ps_q.pending_painpoint_id
+              JOIN posts po_q ON po_q.id = pp_q.post_id
+              WHERE ps_q.painpoint_id = p.id
+                AND pp_q.quoted_text IS NOT NULL
+                AND TRIM(pp_q.quoted_text) != ''
+          )
         GROUP BY p.id
         ORDER BY
             local_signal_count DESC,

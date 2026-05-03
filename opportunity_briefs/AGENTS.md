@@ -23,7 +23,7 @@ current versions without going through the repo filesystem:
   requested subreddit.
 4. If data is missing, ask before calling `scrape_subreddit`; scraping is slow
   and uses Reddit/OpenAI quota.
-5. Call `get_opportunity_evidence(subreddit, limit=25)`.
+5. Call `get_opportunity_evidence(subreddit, limit=30)` (the value comes from `opportunities.BRIEF_EVIDENCE_LIMIT` — update there to re-tune).
 6. Classify each pack into a conviction tier per `SYNTHESIS_TEMPLATE.md`
   (fields and rubric) and render the brief per `BRIEF_LAYOUT.md` (document
   skeleton, card markdown, Cursor-canvas escape hatch); build the shortlist

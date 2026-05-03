@@ -14,8 +14,19 @@ from pydantic import BaseModel, Field
 
 from db.opportunity_queries import get_opportunity_evidence_rows
 
-DEFAULT_LIMIT = 10
-DEFAULT_EVIDENCE_LIMIT = 4
+BRIEF_EVIDENCE_LIMIT = 30
+"""Default painpoint count for opportunity-brief synthesis.
+
+Single source of truth referenced by `mcp_server.opportunity_brief` (the
+launcher prompt), `opportunity_briefs/AGENTS.md` (step 5 of the workflow),
+and `tests/test_mcp_brief.py` (the prompt-body assertion). Update here to
+re-tune the brief workflow."""
+
+DEFAULT_EVIDENCE_LIMIT = 10
+"""Per-side cap on quotes returned in each evidence pack (local + cross).
+
+Sized so the synthesis template's `3-6 quotes per opportunity` ask sees a
+generous pool to pick from rather than being pinned at the lower bound."""
 
 
 class EvidenceQuote(BaseModel):
@@ -60,14 +71,18 @@ class OpportunityEvidenceResponse(BaseModel):
     painpoints: list[OpportunityEvidencePack]
 
 
-def get_opportunity_evidence(subreddit, *, limit=DEFAULT_LIMIT, category=None):
-    """Return ranked evidence packs for opportunity synthesis."""
+def get_opportunity_evidence(subreddit, *, limit=BRIEF_EVIDENCE_LIMIT, category=None):
+    """Return ranked evidence packs for opportunity synthesis.
+
+    `limit` is a post-filter contract: the upstream SQL already requires each
+    candidate painpoint to have at least one source with a non-empty quote,
+    so the caller asking for N packs gets up to N packs back (capped by the
+    actual number of quoted painpoints in the subreddit)."""
     subreddit = _normalize_subreddit(subreddit)
     rows = get_opportunity_evidence_rows(
         subreddit, limit=_clamp_limit(limit), category=category,
     )
     packs = [_build_pack(row) for row in rows]
-    packs = [pack for pack in packs if pack.local_evidence or pack.cross_subreddit_evidence]
     response = OpportunityEvidenceResponse(
         requested_subreddit=subreddit,
         category=category,
