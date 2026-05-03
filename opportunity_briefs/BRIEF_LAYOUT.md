@@ -55,8 +55,12 @@ rules. No markdown syntax appears in this section.
    heading uses (see Conviction badge taxonomy below) so the two stay in
    sync.
 6. Detailed opportunities — a section header followed by one card per
-   opportunity. Cards are grouped under conviction-tier headers (Highest /
-   Strong / Exploratory) per `SYNTHESIS_TEMPLATE.md`.
+   opportunity. Cards are listed as a single ranked sequence ordered by
+   the agent's judgment of evidence strength (strongest first). Do not
+   group cards under conviction-tier sub-headers; the per-card badge is
+   the only conviction signal the reader sees. The tier classification in
+   `SYNTHESIS_TEMPLATE.md` still gates surface vs. hold-back, but it does
+   not dictate a visible grouping.
 7. Method notes — a footer with two short labeled blocks: MCP DB (db path
    plus before/after stats) and Signal Interpretation (the standard
    "signal strength is directional founder research, not TAM sizing"
@@ -120,8 +124,9 @@ the card heading.
   purely inferred.
 - Caveats footer: optional per card; omit if there is nothing of substance
   to say.
-- Cards are grouped under conviction-tier headers per
-  `SYNTHESIS_TEMPLATE.md`.
+- Card ordering: agent-ranked from strongest to weakest evidence judgment.
+  No tier section headers; the per-card badge carries the conviction
+  signal.
 
 ## Layer 3: Markdown rendering notes
 
@@ -138,19 +143,18 @@ For each Layer 2 element, the markdown construct to use:
 - Opportunity shortlist → markdown table:
   `| Rank | Opportunity | Primary Segment | Signal |`.
 - Detailed opportunities header → `## Detailed Opportunities`.
-- Conviction-tier sub-header (when grouping cards) → `### Highest conviction`,
-  `### Strong conviction`, `### Exploratory`.
-- Card heading → `#### N. {Title} — *{badge}*` (italic suffix is the
+- Card heading → `### N. {Title} — *{badge}*` (italic suffix is the
   markdown stand-in for the floating canvas badge; the badge value follows
-  the loosened taxonomy in Layer 2).
+  the loosened taxonomy in Layer 2). Cards live directly under
+  `## Detailed Opportunities` — no intermediate tier section header.
 - Problem / User Segment / Signal Strength / Builder Fit / Evidence-vs-Fit
   Tradeoff / MVP Angle / Cross-subreddit relevance → bold-labeled paragraph,
   e.g. `**Problem.** ...`.
-- Evidence Quotes → `##### Evidence Quotes` sub-heading, then each quote on
+- Evidence Quotes → `#### Evidence Quotes` sub-heading, then each quote on
   its own line as
   `> "quote text" — [Post (score N): short label](https://reddit.com/...)`.
-- Risks → `##### Risks` sub-heading plus bullet list.
-- Interview Questions → `##### Interview Questions` sub-heading plus
+- Risks → `#### Risks` sub-heading plus bullet list.
+- Interview Questions → `#### Interview Questions` sub-heading plus
   numbered list.
 - Caveats → `_Caveats: ..._` italic footer (1-2 sentences, single block).
 - Card separator → `---` between cards.
@@ -164,7 +168,7 @@ including the conditional Builder Fit, Evidence-vs-Fit Tradeoff, and
 Cross-subreddit relevance sections. Placeholder values only; copy and adapt.
 
 ```markdown
-#### 1. Example opportunity title — *strong*
+### 1. Example opportunity title — *strong*
 
 **Problem.** One or two sentences naming the user's concrete pain.
 
@@ -182,7 +186,7 @@ this paragraph only when explicit preferences were supplied.
 **Evidence-vs-Fit Tradeoff.** One or two sentences calling out the tradeoff
 between the evidence strength and the builder fit, when both are known.
 
-##### Evidence Quotes
+#### Evidence Quotes
 
 > "exact quote text from the post or comment" — [Post (score 844): short label](https://reddit.com/r/example/comments/abc123/example_post/)
 > "second quote, different source if possible" — [Comment (score 112): short label](https://reddit.com/r/example/comments/abc123/example_post/def456/)
@@ -190,7 +194,7 @@ between the evidence strength and the builder fit, when both are known.
 **MVP Angle.** One or two sentences describing the smallest product that
 would test willingness to pay for this pain.
 
-##### Risks
+#### Risks
 
 - Risk one: a concrete failure mode the agent can name from the evidence.
 - Risk two: why existing solutions may fail (folded in as a risk bullet).
@@ -201,7 +205,7 @@ would test willingness to pay for this pain.
 otherwise fold into the Caveats line as "cross-community extension
 inferred, not in DB."
 
-##### Interview Questions
+#### Interview Questions
 
 1. Question that probes whether the named pain matches the user's actual
    workflow.

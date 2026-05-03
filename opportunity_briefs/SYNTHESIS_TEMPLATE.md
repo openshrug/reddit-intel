@@ -40,13 +40,19 @@ writing the brief.
 
 Default rendering:
 
-- Include everything in **Highest conviction** and **Strong conviction** in
-  the initial brief, grouped under tier headers.
-- Hold **Exploratory** items back. End the brief with one line: "I'm holding
-  back N exploratory candidates with thinner evidence — say the word if you
-  want them."
-- If there are zero highest-conviction items, say so plainly and surface
-  strong + exploratory together.
+- The tier classification is a **gate**, not a grouping. Surface every
+  Highest- and Strong-conviction pack in the initial brief; hold every
+  Exploratory pack back.
+- Cards are listed as a single ranked sequence ordered by your judgment of
+  evidence strength (strongest first). Do **not** group cards under
+  Highest / Strong / Exploratory section headers — the per-card badge is
+  the only conviction signal the reader sees.
+- End the brief with one line: "I'm holding back N exploratory candidates
+  with thinner evidence — say the word if you want them." Omit the line
+  when N is zero.
+- If there are zero Highest-conviction packs, say so plainly and still
+  surface Strong + Exploratory together (Exploratory is no longer held
+  back when the brief would otherwise be empty).
 
 The **displayed badge** for each card is a free-form 1-3 word descriptor
 that should be anchored to but is not constrained by these tiers — use a
