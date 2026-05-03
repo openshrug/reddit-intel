@@ -4,26 +4,33 @@ Use these instructions when turning `get_opportunity_evidence` output into
 product opportunity briefs.
 
 `SYNTHESIS_TEMPLATE.md` is the canonical synthesis prompt. For run-specific
-behavior, edit or copy that template; the MCP evidence response returns it as
-the agent-facing synthesis prompt.
+behavior, edit or copy that template. Both this file and the synthesis
+template are exposed via MCP so any MCP-aware agent can fetch the current
+versions without going through the repo filesystem:
+
+- `reddit-intel://opportunity-brief-instructions` serves this file.
+- `reddit-intel://opportunity-brief-template` serves `SYNTHESIS_TEMPLATE.md`.
 
 ## Flow
 
 1. Parse the requested subreddit from prompts like `brief me on r/smallbusiness`.
-2. If the user did not specify a count, ask how many opportunities they want.
-3. Ask small personalization questions only if builder fit would materially
+2. Ask small personalization questions only if builder fit would materially
   change the final ranking.
-4. Read `reddit-intel://stats` and call `get_subreddit_summary` for the
+3. Read `reddit-intel://stats` and call `get_subreddit_summary` for the
   requested subreddit.
-5. If data is missing, ask before calling `scrape_subreddit`; scraping is slow
+4. If data is missing, ask before calling `scrape_subreddit`; scraping is slow
   and uses Reddit/OpenAI quota.
-6. Call `get_opportunity_evidence(subreddit, limit=10)`.
-7. Build an evidence-first opportunity shortlist from the returned packs.
-8. After presenting the brief, ask whether the user wants to persist it under
+5. Call `get_opportunity_evidence(subreddit, limit=25)`.
+6. Classify each pack into a conviction tier per `SYNTHESIS_TEMPLATE.md` and
+  build the shortlist from highest + strong conviction tiers; hold exploratory
+  candidates back unless the user asks for more breadth.
+7. After presenting the brief, ask whether the user wants to persist it under
   `opportunity_briefs/runs/`.
-9. If the user says yes, persist the exact `SYNTHESIS_TEMPLATE.md` used
+8. If the user says yes, persist the exact `SYNTHESIS_TEMPLATE.md` used
   alongside `evidence.json`, `assumptions.md`, and `brief.md` so the synthesis
   is reproducible later.
+9. If the user asks for more breadth, surface the held-back exploratory
+  candidates using the same per-opportunity structure.
 
 ## Evidence Rules
 
@@ -34,6 +41,8 @@ market knowledge.
 - Render every quote as a Markdown hyperlink using `source_permalink`.
 - Treat signal counts as repetition signals, not market-size estimates.
 - Treat category labels as navigation aids, not ground truth.
+- Treat Reddit evidence as qualitative signal, not proof of demand or
+willingness to pay.
 - Do not estimate TAM, willingness to pay, or competitor coverage unless the
 evidence directly supports it.
 

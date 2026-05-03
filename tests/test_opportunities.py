@@ -3,7 +3,6 @@ import os
 import pytest
 
 import db
-import opportunities
 from db.opportunity_queries import get_opportunity_evidence_rows
 from db.painpoints import save_pending_painpoint
 from db.posts import upsert_comment, upsert_post
@@ -36,7 +35,7 @@ def test_query_utility_groups_local_and_cross_subreddit_evidence(opportunity_db)
     assert all(item["source_permalink"].startswith("https://reddit.com/") for item in local + cross)
 
 
-def test_opportunity_response_is_agent_ready_without_openai(opportunity_db):
+def test_opportunity_response_is_pure_evidence_without_openai(opportunity_db):
     assert "OPENAI_API_KEY" not in os.environ
 
     response = get_opportunity_evidence("r/smallbusiness", limit=5)
@@ -50,22 +49,9 @@ def test_opportunity_response_is_agent_ready_without_openai(opportunity_db):
     assert first["local_evidence"][0]["source_permalink"]
     assert first["cross_subreddit_evidence"][0]["source_permalink"]
 
-    guidelines = response["agent_guidelines"]
-    assert "evidence-only shortlist" in guidelines["synthesis_prompt"]
-    assert "Render every evidence quote" in guidelines["core_rules"][3]
-    assert "deduped sources" in response["caveats"][2]
-
-
-def test_synthesis_prompt_loads_from_template(opportunity_db, tmp_path, monkeypatch):
-    template = tmp_path / "template.md"
-    template.write_text("Custom brief template for r/{subreddit}")
-    monkeypatch.setattr(opportunities, "SYNTHESIS_TEMPLATE", template)
-
-    response = get_opportunity_evidence("smallbusiness", limit=1)
-
-    assert response["agent_guidelines"]["synthesis_prompt"] == (
-        "Custom brief template for r/smallbusiness"
-    )
+    assert "agent_guidelines" not in response
+    assert "caveats" not in response
+    assert "caveats" not in first
 
 
 def test_category_filter_limits_candidates(opportunity_db):
@@ -85,7 +71,7 @@ def test_mcp_wrapper_returns_same_evidence_shape(opportunity_db):
 
     assert response["requested_subreddit"] == "smallbusiness"
     assert response["painpoints"][0]["local_evidence"][0]["source_permalink"]
-    assert "agent_guidelines" in response
+    assert "agent_guidelines" not in response
 
 
 def _seed_opportunity_data():

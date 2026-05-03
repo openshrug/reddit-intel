@@ -32,6 +32,12 @@ load_dotenv()
 
 log = logging.getLogger(__name__)
 
+OPPORTUNITY_BRIEF_TRIGGERS = [
+    "brief me on",
+    "generate a brief",
+    "opportunity brief",
+]
+
 mcp = FastMCP(
     "reddit-intel",
     instructions=(
@@ -40,6 +46,12 @@ mcp = FastMCP(
         "  1. Read reddit-intel://stats + reddit-intel://taxonomy to ground yourself.\n"
         "  2. Browse with get_opportunity_evidence or get_top_painpoints.\n"
         "  3. Call scrape_subreddit ONLY for fresh data (slow, costs API quota).\n"
+        "Opportunity briefs: route 'brief me on r/<sub>', 'generate a brief on "
+        "<sub>', or 'opportunity brief on <sub>' to the opportunity_brief "
+        "prompt — it pulls workflow from "
+        "reddit-intel://opportunity-brief-instructions and synthesis from "
+        "reddit-intel://opportunity-brief-template, then calls "
+        "get_opportunity_evidence under the hood.\n"
         "Escape hatch: run_sql for ad-hoc SELECTs — read reddit-intel://schema first."
     ),
 )
@@ -132,11 +144,12 @@ def get_opportunity_evidence(
     limit: int = 10,
     category: str | None = None,
 ) -> dict:
-    """Agent-ready opportunity evidence packs for a subreddit. Returns ranked
-    painpoints with local evidence, cross-subreddit support, clickable source
-    permalinks, caveats, and synthesis guidelines. Use this when the user wants
-    product opportunities; the agent should synthesize briefs from the returned
-    evidence rather than inventing ideas directly."""
+    """Ranked opportunity evidence packs for a subreddit: painpoints with
+    local evidence, cross-subreddit support, and clickable source permalinks.
+    Pure data — no synthesis guidance is returned. For the brief workflow and
+    synthesis structure, use the opportunity_brief prompt and the
+    reddit-intel://opportunity-brief-instructions +
+    reddit-intel://opportunity-brief-template resources."""
     return opportunities.get_opportunity_evidence(
         subreddit, limit=limit, category=category,
     )
@@ -256,6 +269,62 @@ def db_taxonomy() -> str:
             for c in cats
         )
         or "- Uncategorized"
+    )
+
+
+@mcp.resource("reddit-intel://opportunity-brief-instructions")
+def opportunity_brief_instructions() -> str:
+    """MCP-first opportunity brief workflow (Markdown). Source of truth for
+    tool-use flow and evidence-handling rules; edit the file to change agent
+    behavior without touching Python."""
+    return (
+        Path(__file__).parent / "opportunity_briefs" / "AGENTS.md"
+    ).read_text()
+
+
+@mcp.resource("reddit-intel://opportunity-brief-template")
+def opportunity_brief_template() -> str:
+    """Customizable opportunity brief synthesis template (Markdown). Source of
+    truth for the per-opportunity output structure used by the
+    opportunity_brief prompt."""
+    return (
+        Path(__file__).parent / "opportunity_briefs" / "SYNTHESIS_TEMPLATE.md"
+    ).read_text()
+
+
+# ============================================================
+# Prompts
+# ============================================================
+
+
+@mcp.prompt
+def opportunity_brief(subreddit: str) -> str:
+    """Produce a product-opportunity brief for a subreddit using reddit-intel
+    evidence packs. Recognized natural-language triggers include
+    'brief me on r/<sub>', 'generate a brief on <sub>', and
+    'opportunity brief on <sub>'."""
+    return (
+        f"Generate an opportunity brief for r/{subreddit}.\n"
+        "\n"
+        "Recognized triggers: 'brief me on r/<sub>', "
+        "'generate a brief on <sub>', 'opportunity brief on <sub>'.\n"
+        "\n"
+        "Surface as many opportunities as the evidence honestly supports. Do "
+        "not ask the user for a count and do not pad to a target number; the "
+        "template's conviction tiers decide what makes the initial brief.\n"
+        "\n"
+        "Workflow:\n"
+        "1. Fetch reddit-intel://opportunity-brief-instructions and follow it "
+        "for tool-use flow (stats check, scrape permission, persistence "
+        "prompt).\n"
+        "2. Fetch reddit-intel://opportunity-brief-template and follow it for "
+        "the conviction-tier classification and the per-opportunity output "
+        "structure.\n"
+        f"3. Call get_opportunity_evidence(subreddit='{subreddit}', limit=25) "
+        "as the evidence API.\n"
+        "\n"
+        "Do not restate the rules from the instructions resource or the "
+        "structure from the template resource — fetch them and follow them."
     )
 
 

@@ -144,11 +144,19 @@ Add to `~/.config/openclaw/openclaw.json5`:
 
 ### Available resources
 
-| URI                        | Description                                                |
-| -------------------------- | ---------------------------------------------------------- |
-| `reddit-intel://schema`    | Database schema (for composing `run_sql` queries)          |
-| `reddit-intel://stats`     | DB stats snapshot                                          |
-| `reddit-intel://taxonomy`  | Category taxonomy                                          |
+| URI                                              | Description                                                                |
+| ------------------------------------------------ | -------------------------------------------------------------------------- |
+| `reddit-intel://schema`                          | Database schema (for composing `run_sql` queries)                          |
+| `reddit-intel://stats`                           | DB stats snapshot                                                          |
+| `reddit-intel://taxonomy`                        | Category taxonomy                                                          |
+| `reddit-intel://opportunity-brief-instructions`  | Workflow + evidence rules for opportunity briefs (Markdown, customizable)  |
+| `reddit-intel://opportunity-brief-template`      | Synthesis template for opportunity briefs (Markdown, customizable)         |
+
+### Available prompts
+
+| Prompt              | Description                                                                                                                          |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `opportunity_brief` | Thin launcher that points the agent at the two brief resources and `get_opportunity_evidence`. Takes only `subreddit`; the agent surfaces opportunities by conviction tier from the evidence rather than asking for a target count. |
 
 ### Opportunity discovery prompt
 
@@ -158,14 +166,21 @@ After connecting the MCP server, try:
 Brief me on r/smallbusiness.
 ```
 
-The agent should ask how many opportunities you want, ask small personalization
-questions only if builder fit would materially change the ranking, call
-`get_subreddit_summary("smallbusiness")`, ask before scraping if data is
-missing, then call `get_opportunity_evidence("smallbusiness", limit=10)`.
+In MCP clients that surface prompts, this routes to the `opportunity_brief`
+prompt. The prompt is a thin launcher: it tells the agent to fetch
+`reddit-intel://opportunity-brief-instructions` (workflow + evidence rules)
+and `reddit-intel://opportunity-brief-template` (synthesis structure +
+conviction-tier classifier), then call
+`get_opportunity_evidence(subreddit, limit=25)` for evidence. The agent
+classifies each evidence pack into highest / strong / exploratory conviction
+and surfaces the highest + strong tiers in the initial brief; exploratory
+candidates are held back unless you ask for more breadth. All workflow and
+synthesis rules live in the two Markdown files; edit them to change agent
+behavior without touching Python.
 
-See [`opportunity_briefs/AGENTS.md`](opportunity_briefs/AGENTS.md) for the
-agent flow and [`opportunity_briefs/SYNTHESIS_TEMPLATE.md`](opportunity_briefs/SYNTHESIS_TEMPLATE.md)
-for the customizable brief template.
+For the source files, see
+[`opportunity_briefs/AGENTS.md`](opportunity_briefs/AGENTS.md) and
+[`opportunity_briefs/SYNTHESIS_TEMPLATE.md`](opportunity_briefs/SYNTHESIS_TEMPLATE.md).
 
 ## Credentials
 

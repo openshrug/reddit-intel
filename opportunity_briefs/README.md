@@ -1,10 +1,16 @@
 # Opportunity Briefs
 
-This folder holds agent instructions and optional saved research artifacts for
-the MCP opportunity-discovery flow.
+This folder holds the agent workflow + synthesis template for the MCP
+opportunity-discovery flow, plus optional saved research artifacts.
 
-`reddit-intel` supplies evidence packs. Your agent turns those packs into
-product opportunity briefs.
+`reddit-intel` supplies evidence packs (via `get_opportunity_evidence`); your
+agent turns those packs into product opportunity briefs by following the
+workflow in `AGENTS.md` and the synthesis structure in
+`SYNTHESIS_TEMPLATE.md`. Both files are exposed via MCP so any MCP-aware
+client can fetch the current versions:
+
+- `reddit-intel://opportunity-brief-instructions` -> `AGENTS.md`
+- `reddit-intel://opportunity-brief-template` -> `SYNTHESIS_TEMPLATE.md`
 
 ## First Demo Flow
 
@@ -14,16 +20,25 @@ Ask your agent:
 Brief me on r/smallbusiness.
 ```
 
-The agent should:
+In MCP clients that surface prompts, this routes to the `opportunity_brief`
+prompt registered by `mcp_server.py`. The prompt takes only the subreddit
+name — there is no count parameter and the agent does not ask the user for a
+target number. The prompt is a thin launcher that:
 
-1. Ask how many opportunities the user wants if no count was provided.
-2. Ask small personalization questions only if builder fit would materially
-   change the ranking.
-3. Read `reddit-intel://stats`.
-4. Call `get_subreddit_summary("smallbusiness")`.
-5. Ask before scraping if there is no data.
-6. Call `get_opportunity_evidence("smallbusiness", limit=10)`.
-7. Produce opportunity briefs using `opportunity_briefs/AGENTS.md`.
+1. Tells the agent to fetch `reddit-intel://opportunity-brief-instructions`
+   and follow it for tool-use flow (stats check, scrape permission,
+   persistence prompt).
+2. Tells the agent to fetch `reddit-intel://opportunity-brief-template` and
+   follow it for conviction-tier classification and the per-opportunity
+   output structure.
+3. Tells the agent to call `get_opportunity_evidence(subreddit, limit=25)`
+   for the evidence.
+
+The agent classifies each evidence pack into highest / strong / exploratory
+conviction (criteria in `SYNTHESIS_TEMPLATE.md`) and surfaces highest +
+strong in the initial brief; exploratory items are held back unless you ask
+for more breadth. All workflow and synthesis rules live in the two Markdown
+files; edit them to change agent behavior without touching Python.
 
 ## Folder Layout
 
@@ -36,11 +51,8 @@ opportunity_briefs/
     <local generated runs, gitignored>
 ```
 
-`SYNTHESIS_TEMPLATE.md` is the customizable prompt template returned by
-`get_opportunity_evidence`. Edit or copy it when you want a different brief
-style for a run. `runs/` is for local outputs and may contain private
-assumptions, bulky evidence snapshots, or messy drafts. Example runs will be
-generated later from real captured evidence.
+`runs/` is for local outputs and may contain private assumptions, bulky
+evidence snapshots, or messy drafts.
 
 ## Evidence Scope
 

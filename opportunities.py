@@ -1,10 +1,12 @@
 """Agent-ready opportunity evidence packs.
 
 reddit-intel stays evidence-first: this module packages ranked painpoint
-evidence and synthesis instructions, but it does not generate product ideas.
+evidence for opportunity discovery. Synthesis instructions and workflow rules
+live in `opportunity_briefs/AGENTS.md` and
+`opportunity_briefs/SYNTHESIS_TEMPLATE.md`, exposed via MCP resources by
+`mcp_server.py`.
 """
 
-from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -13,16 +15,6 @@ from db.opportunity_queries import get_opportunity_evidence_rows
 
 DEFAULT_LIMIT = 10
 DEFAULT_EVIDENCE_LIMIT = 4
-SYNTHESIS_TEMPLATE = Path(__file__).parent / "opportunity_briefs" / "SYNTHESIS_TEMPLATE.md"
-
-CORE_RULES = [
-    "Start from evidence packs; do not invent opportunities from general market knowledge.",
-    "Use an evidence-first, fit-second flow: identify the strongest opportunities before applying builder preferences.",
-    "If the user does not provide builder preferences, do not invent defaults and omit builder fit.",
-    "Render every evidence quote as a Markdown hyperlink using source_permalink.",
-    "Treat signal_count and source counts as repetition signals, not market-size estimates.",
-    "Treat categories as rough navigation, not authoritative market structure.",
-]
 
 
 class EvidenceQuote(BaseModel):
@@ -58,13 +50,6 @@ class OpportunityEvidencePack(BaseModel):
     evidence_strength: EvidenceStrength
     local_evidence: list[EvidenceQuote] = Field(default_factory=list)
     cross_subreddit_evidence: list[EvidenceQuote] = Field(default_factory=list)
-    caveats: list[str] = Field(default_factory=list)
-
-
-class AgentGuidelines(BaseModel):
-    core_rules: list[str]
-    output_fields: list[str]
-    synthesis_prompt: str
 
 
 class OpportunityEvidenceResponse(BaseModel):
@@ -72,12 +57,10 @@ class OpportunityEvidenceResponse(BaseModel):
     category: str | None = None
     total_painpoints: int
     painpoints: list[OpportunityEvidencePack]
-    agent_guidelines: AgentGuidelines
-    caveats: list[str]
 
 
 def get_opportunity_evidence(subreddit, *, limit=DEFAULT_LIMIT, category=None):
-    """Return agent-ready evidence packs for opportunity synthesis."""
+    """Return ranked evidence packs for opportunity synthesis."""
     subreddit = _normalize_subreddit(subreddit)
     rows = get_opportunity_evidence_rows(
         subreddit, limit=_clamp_limit(limit), category=category,
@@ -89,13 +72,6 @@ def get_opportunity_evidence(subreddit, *, limit=DEFAULT_LIMIT, category=None):
         category=category,
         total_painpoints=len(packs),
         painpoints=packs,
-        agent_guidelines=_agent_guidelines(subreddit),
-        caveats=[
-            "Reddit evidence is qualitative signal, not proof of demand or willingness to pay.",
-            "Cross-subreddit evidence is adjacent support; local evidence should lead subreddit-specific briefs.",
-            "Signal counts can include deduped sources that do not have separate stored quotes.",
-            "Category labels are navigation aids and may drift.",
-        ],
     )
     return response.model_dump()
 
@@ -122,11 +98,6 @@ def _build_pack(row):
         ),
         local_evidence=local,
         cross_subreddit_evidence=cross,
-        caveats=[
-            "Use local evidence first for this subreddit.",
-            "Use cross-subreddit evidence only as clearly labeled adjacent support.",
-            "Signal counts can exceed quote counts when deduped sources lack separate stored quotes.",
-        ],
     )
 
 
@@ -144,31 +115,6 @@ def _quote(item):
         source_score=item.get("source_score"),
         post_created_utc=item.get("post_created_utc"),
     )
-
-
-def _agent_guidelines(subreddit):
-    return AgentGuidelines(
-        core_rules=CORE_RULES,
-        output_fields=[
-            "Opportunity title",
-            "Problem statement",
-            "Who seems affected, marked as inferred when needed",
-            "Evidence strength",
-            "Builder fit, only when explicit preferences are known",
-            "Evidence-vs-fit tradeoff, only when explicit preferences are known",
-            "Clickable evidence quotes",
-            "MVP wedge",
-            "Why existing solutions may fail, or unknown",
-            "Why this may extend beyond one community",
-            "Validation questions",
-            "Caveats",
-        ],
-        synthesis_prompt=_load_synthesis_template().format(subreddit=subreddit),
-    )
-
-
-def _load_synthesis_template():
-    return SYNTHESIS_TEMPLATE.read_text()
 
 
 def _clamp_limit(limit):
