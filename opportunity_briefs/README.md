@@ -5,12 +5,14 @@ opportunity-discovery flow, plus optional saved research artifacts.
 
 `reddit-intel` supplies evidence packs (via `get_opportunity_evidence`); your
 agent turns those packs into product opportunity briefs by following the
-workflow in `AGENTS.md` and the synthesis structure in
-`SYNTHESIS_TEMPLATE.md`. Both files are exposed via MCP so any MCP-aware
-client can fetch the current versions:
+workflow in `AGENTS.md`, the synthesis structure in `SYNTHESIS_TEMPLATE.md`,
+and the rendering / canvas-escape-hatch rules in `BRIEF_LAYOUT.md`. All
+three files are exposed via MCP so any MCP-aware client can fetch the
+current versions:
 
 - `reddit-intel://opportunity-brief-instructions` -> `AGENTS.md`
 - `reddit-intel://opportunity-brief-template` -> `SYNTHESIS_TEMPLATE.md`
+- `reddit-intel://opportunity-brief-layout` -> `BRIEF_LAYOUT.md`
 
 ## First Demo Flow
 
@@ -30,21 +32,26 @@ target number. The prompt is a thin launcher that:
    persistence prompt).
 2. Tells the agent to fetch `reddit-intel://opportunity-brief-template` and
    follow it for conviction-tier classification and the per-opportunity
-   output structure.
-3. Tells the agent to call `get_opportunity_evidence(subreddit, limit=25)`
+   field list.
+3. Tells the agent to fetch `reddit-intel://opportunity-brief-layout` and
+   follow it for the document skeleton, per-opportunity card rendering,
+   and the Cursor-canvas escape hatch.
+4. Tells the agent to call `get_opportunity_evidence(subreddit, limit=25)`
    for the evidence.
 
 The agent classifies each evidence pack into highest / strong / exploratory
 conviction (criteria in `SYNTHESIS_TEMPLATE.md`) and surfaces highest +
 strong in the initial brief; exploratory items are held back unless you ask
-for more breadth. All workflow and synthesis rules live in the two Markdown
-files; edit them to change agent behavior without touching Python.
+for more breadth. All workflow, synthesis, and layout rules live in the
+three Markdown files; edit them to change agent behavior without touching
+Python.
 
 ## Folder Layout
 
 ```text
 opportunity_briefs/
   AGENTS.md
+  BRIEF_LAYOUT.md
   README.md
   SYNTHESIS_TEMPLATE.md
   runs/

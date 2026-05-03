@@ -1,9 +1,10 @@
 """Agent-ready opportunity evidence packs.
 
 reddit-intel stays evidence-first: this module packages ranked painpoint
-evidence for opportunity discovery. Synthesis instructions and workflow rules
-live in `opportunity_briefs/AGENTS.md` and
-`opportunity_briefs/SYNTHESIS_TEMPLATE.md`, exposed via MCP resources by
+evidence for opportunity discovery. Synthesis instructions, fields, and
+layout rules live in `opportunity_briefs/AGENTS.md`,
+`opportunity_briefs/SYNTHESIS_TEMPLATE.md`, and
+`opportunity_briefs/BRIEF_LAYOUT.md`, exposed via MCP resources by
 `mcp_server.py`.
 """
 

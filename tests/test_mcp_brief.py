@@ -28,10 +28,20 @@ def test_brief_template_resource_returns_synthesis_template_md(mcp_module):
     assert mcp_module.opportunity_brief_template() == expected
 
 
-def test_brief_prompt_references_two_resources_and_evidence_tool(mcp_module):
+def test_brief_layout_resource_returns_brief_layout_md(mcp_module):
+    expected = (
+        Path(mcp_module.__file__).parent
+        / "opportunity_briefs"
+        / "BRIEF_LAYOUT.md"
+    ).read_text()
+    assert mcp_module.opportunity_brief_layout() == expected
+
+
+def test_brief_prompt_references_three_resources_and_evidence_tool(mcp_module):
     body = mcp_module.opportunity_brief(subreddit="smallbusiness")
     assert "reddit-intel://opportunity-brief-instructions" in body
     assert "reddit-intel://opportunity-brief-template" in body
+    assert "reddit-intel://opportunity-brief-layout" in body
     assert "get_opportunity_evidence" in body
 
 

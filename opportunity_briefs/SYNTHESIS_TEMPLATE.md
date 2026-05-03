@@ -1,5 +1,11 @@
 You have access to reddit-intel evidence packs for r/{subreddit}.
 
+> Field rendering, document skeleton, and the Cursor-canvas escape hatch
+> live in `BRIEF_LAYOUT.md` (MCP: `reddit-intel://opportunity-brief-layout`).
+> Read both files before producing a brief. This file owns *what to think
+> about* and *what fields to emit*; the layout file owns *how to render
+> them*.
+
 Ask up to 3 short personalization questions only if builder fit would
 materially change the ranking. Prioritize:
 - Founder profile: technical/non-technical, solo/team, domain expertise
@@ -15,9 +21,11 @@ Surface as many opportunities as the evidence honestly supports — typically
 3-8. Do not pad to a target number, and do not pre-commit to a count before
 classifying the evidence.
 
-## Conviction tiers
+## Conviction tiers (classification rubric)
 
-Classify every evidence pack into one of these tiers before writing the brief.
+These tiers are a **classification rubric** that gates the shortlist plus
+hold-back logic. Classify every evidence pack into one of these tiers before
+writing the brief.
 
 - **Highest conviction**: `local_signal_count >= 3` AND `severity_max >= 6`
   AND at least one quote with notable engagement (post score >= 100 OR
@@ -40,6 +48,15 @@ Default rendering:
 - If there are zero highest-conviction items, say so plainly and surface
   strong + exploratory together.
 
+The **displayed badge** for each card is a free-form 1-3 word descriptor
+that should be anchored to but is not constrained by these tiers — use a
+more nuanced label (e.g. `moderate`, `moderate but broad`, `niche wedge`,
+`moderate to strong`) when the evidence honestly fits between tiers. The
+rubric value above stays internal and gates filtering / hold-back; the
+badge value is the human-facing label that appears on the card heading and
+in the shortlist's Signal column. See `BRIEF_LAYOUT.md` for the badge
+taxonomy and rendering.
+
 ## Synthesis flow
 
 Use an evidence-first, fit-second flow:
@@ -51,19 +68,38 @@ Use an evidence-first, fit-second flow:
 
 ## For each opportunity include
 
-- Conviction: highest / strong / exploratory
-- Opportunity title
-- Problem statement
-- Who seems affected, marked as inferred when needed
-- Evidence strength: source count, signal_count, severity range, and notable scores
-- Builder fit: strong / possible / poor, only when explicit preferences are known
-- Evidence-vs-fit tradeoff, only when explicit preferences are known
-- 3-6 exact evidence quotes, each rendered as a Markdown hyperlink to source_permalink
-- MVP wedge
-- Why existing solutions may fail, or "unknown" if unsupported
-- Why this may extend beyond one community
-- 3 validation questions
-- Caveats
+These are the *fields* to emit per opportunity, with their semantic meaning.
+The order, grouping, and markdown rendering of these fields live in
+`BRIEF_LAYOUT.md`.
+
+- **Conviction tier** (internal): one of Highest / Strong / Exploratory per
+  the rubric above. Drives shortlist + hold-back logic.
+- **Badge label** (display): free-form 1-3 word descriptor anchored to the
+  rubric. Appears on the card heading and in the shortlist Signal column.
+- **Opportunity title**: short noun phrase naming the product idea.
+- **Problem statement**: 1-2 sentences naming the user's pain.
+- **Who is affected**: the user segment, marked as inferred when broader
+  than the quoted source.
+- **Evidence strength**: source count, signal_count, severity range, and
+  notable engagement scores.
+- **Builder fit**: strong / possible / poor. Render only when explicit
+  builder preferences are known.
+- **Evidence-vs-fit tradeoff**: 1-2 sentences when both evidence and fit
+  are strong signals. Render only when explicit preferences are known.
+- **Evidence quotes**: 3-6 exact quotes, each rendered as a Markdown
+  hyperlink to `source_permalink`.
+- **MVP angle**: 1-2 sentences naming the wedge product the evidence
+  supports.
+- **Risks**: a bulleted list of concrete failure modes; folds in "why
+  existing solutions may fail" content.
+- **Cross-subreddit relevance**: 1-2 sentences naming why the pain may
+  extend beyond r/{subreddit}. Render as its own labeled paragraph when
+  `cross_subreddit_evidence` has actual quotes; fold into the Caveats
+  footer line as "cross-community extension inferred, not in DB" when it
+  is purely inferred.
+- **Interview questions**: 3-5 questions to validate the opportunity.
+- **Caveats**: 1-2 sentences of de-emphasized footer; optional, omit if
+  there is nothing of substance to say.
 
 Signal counts can include deduped sources that do not have separate stored
 quotes, so do not imply every signal has a clickable quote.

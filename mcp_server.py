@@ -49,8 +49,9 @@ mcp = FastMCP(
         "Opportunity briefs: route 'brief me on r/<sub>', 'generate a brief on "
         "<sub>', or 'opportunity brief on <sub>' to the opportunity_brief "
         "prompt — it pulls workflow from "
-        "reddit-intel://opportunity-brief-instructions and synthesis from "
-        "reddit-intel://opportunity-brief-template, then calls "
+        "reddit-intel://opportunity-brief-instructions, synthesis fields from "
+        "reddit-intel://opportunity-brief-template, and rendering from "
+        "reddit-intel://opportunity-brief-layout, then calls "
         "get_opportunity_evidence under the hood.\n"
         "Escape hatch: run_sql for ad-hoc SELECTs — read reddit-intel://schema first."
     ),
@@ -292,6 +293,16 @@ def opportunity_brief_template() -> str:
     ).read_text()
 
 
+@mcp.resource("reddit-intel://opportunity-brief-layout")
+def opportunity_brief_layout() -> str:
+    """Customizable opportunity brief layout (Markdown). Source of truth for
+    the document skeleton, per-opportunity card rendering, and the
+    Cursor-canvas escape hatch used by the opportunity_brief prompt."""
+    return (
+        Path(__file__).parent / "opportunity_briefs" / "BRIEF_LAYOUT.md"
+    ).read_text()
+
+
 # ============================================================
 # Prompts
 # ============================================================
@@ -318,13 +329,17 @@ def opportunity_brief(subreddit: str) -> str:
         "for tool-use flow (stats check, scrape permission, persistence "
         "prompt).\n"
         "2. Fetch reddit-intel://opportunity-brief-template and follow it for "
-        "the conviction-tier classification and the per-opportunity output "
-        "structure.\n"
-        f"3. Call get_opportunity_evidence(subreddit='{subreddit}', limit=25) "
+        "the conviction-tier classification and the per-opportunity field "
+        "list.\n"
+        "3. Fetch reddit-intel://opportunity-brief-layout and follow it for "
+        "the document skeleton, per-opportunity card rendering, and the "
+        "Cursor-canvas escape hatch.\n"
+        f"4. Call get_opportunity_evidence(subreddit='{subreddit}', limit=25) "
         "as the evidence API.\n"
         "\n"
-        "Do not restate the rules from the instructions resource or the "
-        "structure from the template resource — fetch them and follow them."
+        "Do not restate the rules from the instructions resource, the field "
+        "list from the template resource, or the layout from the layout "
+        "resource — fetch them and follow them."
     )
 
 
