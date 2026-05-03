@@ -21,6 +21,12 @@ the included demo UI, or expose to any AI agent through the bundled MCP
 server. The painpoint table is raw material founders feed into product
 ideation, content research, and competitive analysis.
 
+The first agent-native workflow is **opportunity discovery**: ask your
+agent for product opportunities in a subreddit, and reddit-intel returns
+ranked evidence packs with local quotes, cross-subreddit support, and
+clickable Reddit source links. Your agent synthesizes the brief; the
+database remains the evidence layer.
+
 ## Why
 
 - **Local-first.** One SQLite file (`trends.db`) holds everything: raw
@@ -125,6 +131,7 @@ Add to `~/.config/openclaw/openclaw.json5`:
 | -------------------------- | ----- | -------------------------------------------------------------------------- |
 | `get_stats`                | read  | Global DB counts                                                           |
 | `list_categories`          | read  | Full taxonomy                                                              |
+| `get_opportunity_evidence` | read  | Agent-ready evidence packs for opportunity discovery                       |
 | `get_top_painpoints`       | read  | Painpoints ranked by signal count, filterable by category/subreddit        |
 | `get_painpoint`            | read  | Single painpoint by ID                                                     |
 | `get_painpoint_evidence`   | read  | Reddit posts/comments backing a painpoint                                  |
@@ -142,6 +149,23 @@ Add to `~/.config/openclaw/openclaw.json5`:
 | `reddit-intel://schema`    | Database schema (for composing `run_sql` queries)          |
 | `reddit-intel://stats`     | DB stats snapshot                                          |
 | `reddit-intel://taxonomy`  | Category taxonomy                                          |
+
+### Opportunity discovery prompt
+
+After connecting the MCP server, try:
+
+```text
+Brief me on r/smallbusiness.
+```
+
+The agent should ask how many opportunities you want, ask small personalization
+questions only if builder fit would materially change the ranking, call
+`get_subreddit_summary("smallbusiness")`, ask before scraping if data is
+missing, then call `get_opportunity_evidence("smallbusiness", limit=10)`.
+
+See [`opportunity_briefs/AGENTS.md`](opportunity_briefs/AGENTS.md) for the
+agent flow and [`opportunity_briefs/SYNTHESIS_TEMPLATE.md`](opportunity_briefs/SYNTHESIS_TEMPLATE.md)
+for the customizable brief template.
 
 ## Credentials
 

@@ -79,6 +79,7 @@ py-modules = [
     "llm",
     "subriff_scraper",
     "mcp_server",
+    "opportunities",
 ]
 packages = [
     "db",

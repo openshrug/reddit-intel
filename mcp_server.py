@@ -20,6 +20,7 @@ from dotenv import load_dotenv
 from fastmcp import FastMCP
 
 import db
+import opportunities
 import reddit_scraper
 import subreddit_pipeline
 import subriff_scraper
@@ -37,7 +38,7 @@ mcp = FastMCP(
         "Reddit painpoint intelligence DB.\n"
         "Default flow:\n"
         "  1. Read reddit-intel://stats + reddit-intel://taxonomy to ground yourself.\n"
-        "  2. Browse with get_top_painpoints / get_painpoint / get_painpoint_evidence.\n"
+        "  2. Browse with get_opportunity_evidence or get_top_painpoints.\n"
         "  3. Call scrape_subreddit ONLY for fresh data (slow, costs API quota).\n"
         "Escape hatch: run_sql for ad-hoc SELECTs — read reddit-intel://schema first."
     ),
@@ -123,6 +124,22 @@ def get_subreddit_summary(subreddit: str) -> dict:
     before scrape_subreddit. For the actual list of painpoints in r/X, call
     get_top_painpoints(subreddit='X') instead."""
     return queries.get_subreddit_summary(subreddit)
+
+
+@mcp.tool
+def get_opportunity_evidence(
+    subreddit: str,
+    limit: int = 10,
+    category: str | None = None,
+) -> dict:
+    """Agent-ready opportunity evidence packs for a subreddit. Returns ranked
+    painpoints with local evidence, cross-subreddit support, clickable source
+    permalinks, caveats, and synthesis guidelines. Use this when the user wants
+    product opportunities; the agent should synthesize briefs from the returned
+    evidence rather than inventing ideas directly."""
+    return opportunities.get_opportunity_evidence(
+        subreddit, limit=limit, category=category,
+    )
 
 
 # ============================================================

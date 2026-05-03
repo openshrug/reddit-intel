@@ -20,6 +20,7 @@ trends.db.lsh.pkl
 scrape_dumps/
 demo_cache/
 docs/_internal/
+opportunity_briefs/runs/
 report.md
 out.txt
 idea.txt

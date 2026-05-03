@@ -13,6 +13,82 @@ Each entry should answer:
 
 ---
 
+## Cross-subreddit evidence aggregation for opportunity briefs
+
+### Status
+
+**MVP feature with explicit caveats.** The current promotion path already
+merges painpoints globally across the DB: `promoter.run_once()` drains
+all unmerged pending painpoints, and `promote_pending()` calls
+`find_most_similar_painpoint()` against `painpoint_vec` without a
+subreddit filter. This means a canonical painpoint can accumulate
+evidence from multiple subreddits.
+
+For the opportunity-discovery MCP flow, treat that as a feature: a
+pain that appears in `r/selfhosted`, `r/homelab`, and `r/sysadmin` is
+more interesting than one isolated quote. The agent should surface this
+as cross-community support, not hide it.
+
+### Finding
+
+The current read API can make cross-subreddit evidence look like
+"leakage" in a single-subreddit brief:
+
+- `get_painpoints_by_subreddit("X")` returns a canonical painpoint when
+  at least one linked pending painpoint came from `X`.
+- `get_painpoint_evidence(painpoint_id)` returns evidence for the whole
+  canonical painpoint, not only evidence from `X`.
+- `signal_count` is global, so a painpoint shown under one subreddit
+  may be boosted by matching evidence from other communities.
+
+This is directionally useful for the long-term product, but the agent
+must label the scope clearly.
+
+### MVP behavior
+
+For the first `get_opportunity_evidence` flow:
+
+- Prefer local quotes from the requested subreddit first.
+- Include `subreddits_seen` or equivalent scope metadata when evidence
+  spans multiple communities.
+- Distinguish `local_signal_count` from `global_signal_count` if the
+  query helpers can compute it cheaply.
+- Tell the agent that cross-subreddit evidence is expected in shared-DB
+  mode and should be described as additional support.
+- If the user wants strict single-subreddit evidence, the agent should
+  ask permission to run a fresh isolated DB for that subreddit instead
+  of trying to reinterpret the shared DB as isolated.
+
+### Trigger to revisit
+
+Build stricter query-level isolation when any one of these happens:
+
+- Demo users are confused by evidence from subreddits they did not ask
+  about.
+- Opportunity briefs overstate local demand because global signal is not
+  separated from subreddit-local signal.
+- We add first-class cross-subreddit market-map workflows where local
+  vs. adjacent-community evidence needs to be compared systematically.
+
+### Sketch
+
+Add opportunity-evidence query helpers that return both local and global
+scope:
+
+- `requested_subreddit`
+- `local_evidence`
+- `cross_subreddit_evidence`
+- `local_signal_count`
+- `global_signal_count`
+- `subreddits_seen`
+
+Use `pending_painpoint_all_sources` where possible so evidence attached
+through pending-stage dedup is not undercounted. Keep shared-DB
+aggregation as the default, and use fresh isolated DB runs for strict
+single-subreddit briefs.
+
+---
+
 ## OpenAI rate limiting — Phase 2: hybrid RPM + TPM token-velocity tracker
 
 ### Status
