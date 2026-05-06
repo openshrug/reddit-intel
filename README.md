@@ -151,7 +151,7 @@ Add to `~/.config/openclaw/openclaw.json5`:
 | `reddit-intel://taxonomy`                        | Category taxonomy                                                          |
 | `reddit-intel://opportunity-brief-instructions`  | Workflow + evidence rules for opportunity briefs (Markdown, customizable)  |
 | `reddit-intel://opportunity-brief-template`      | Synthesis fields + conviction-tier rubric for opportunity briefs (Markdown, customizable) |
-| `reddit-intel://opportunity-brief-layout`        | Document skeleton, card markdown, and Cursor-canvas escape hatch for opportunity briefs (Markdown, customizable) |
+| `reddit-intel://opportunity-brief-layout`        | Document skeleton and card markdown for opportunity briefs (Markdown, customizable) |
 
 ### Available prompts
 
@@ -172,7 +172,7 @@ prompt. The prompt is a thin launcher: it tells the agent to fetch
 `reddit-intel://opportunity-brief-instructions` (workflow + evidence rules),
 `reddit-intel://opportunity-brief-template` (synthesis fields +
 conviction-tier rubric), and `reddit-intel://opportunity-brief-layout`
-(document skeleton, card markdown, and Cursor-canvas escape hatch), then
+(document skeleton and card markdown), then
 call `get_opportunity_evidence(subreddit, limit=30)` for evidence (the value
 comes from `opportunities.BRIEF_EVIDENCE_LIMIT`). The agent
 classifies each evidence pack into highest / strong / exploratory conviction

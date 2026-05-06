@@ -6,9 +6,8 @@ opportunity-discovery flow, plus optional saved research artifacts.
 `reddit-intel` supplies evidence packs (via `get_opportunity_evidence`); your
 agent turns those packs into product opportunity briefs by following the
 workflow in `AGENTS.md`, the synthesis structure in `SYNTHESIS_TEMPLATE.md`,
-and the rendering / canvas-escape-hatch rules in `BRIEF_LAYOUT.md`. All
-three files are exposed via MCP so any MCP-aware client can fetch the
-current versions:
+and the rendering rules in `BRIEF_LAYOUT.md`. All three files are exposed
+via MCP so any MCP-aware client can fetch the current versions:
 
 - `reddit-intel://opportunity-brief-instructions` -> `AGENTS.md`
 - `reddit-intel://opportunity-brief-template` -> `SYNTHESIS_TEMPLATE.md`
@@ -34,8 +33,7 @@ target number. The prompt is a thin launcher that:
    follow it for conviction-tier classification and the per-opportunity
    field list.
 3. Tells the agent to fetch `reddit-intel://opportunity-brief-layout` and
-   follow it for the document skeleton, per-opportunity card rendering,
-   and the Cursor-canvas escape hatch.
+   follow it for the document skeleton and per-opportunity card rendering.
 4. Tells the agent to call `get_opportunity_evidence(subreddit, limit=30)` (the value comes from `opportunities.BRIEF_EVIDENCE_LIMIT`)
    for the evidence.
 

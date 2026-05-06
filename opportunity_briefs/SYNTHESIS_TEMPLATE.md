@@ -1,10 +1,9 @@
 You have access to reddit-intel evidence packs for r/{subreddit}.
 
-> Field rendering, document skeleton, and the Cursor-canvas escape hatch
-> live in `BRIEF_LAYOUT.md` (MCP: `reddit-intel://opportunity-brief-layout`).
-> Read both files before producing a brief. This file owns *what to think
-> about* and *what fields to emit*; the layout file owns *how to render
-> them*.
+> Field rendering and the document skeleton live in `BRIEF_LAYOUT.md`
+> (MCP: `reddit-intel://opportunity-brief-layout`). Read both files
+> before producing a brief. This file owns *what to think about* and
+> *what fields to emit*; the layout file owns *how to render them*.
 
 Ask up to 3 short personalization questions only if builder fit would
 materially change the ranking. Prioritize:

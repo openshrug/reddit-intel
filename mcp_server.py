@@ -296,8 +296,8 @@ def opportunity_brief_template() -> str:
 @mcp.resource("reddit-intel://opportunity-brief-layout")
 def opportunity_brief_layout() -> str:
     """Customizable opportunity brief layout (Markdown). Source of truth for
-    the document skeleton, per-opportunity card rendering, and the
-    Cursor-canvas escape hatch used by the opportunity_brief prompt."""
+    the document skeleton and per-opportunity card rendering used by the
+    opportunity_brief prompt."""
     return (
         Path(__file__).parent / "opportunity_briefs" / "BRIEF_LAYOUT.md"
     ).read_text()
@@ -332,8 +332,7 @@ def opportunity_brief(subreddit: str) -> str:
         "the conviction-tier classification and the per-opportunity field "
         "list.\n"
         "3. Fetch reddit-intel://opportunity-brief-layout and follow it for "
-        "the document skeleton, per-opportunity card rendering, and the "
-        "Cursor-canvas escape hatch.\n"
+        "the document skeleton and per-opportunity card rendering.\n"
         f"4. Call get_opportunity_evidence(subreddit='{subreddit}', "
         f"limit={opportunities.BRIEF_EVIDENCE_LIMIT}) as the evidence API.\n"
         "\n"
