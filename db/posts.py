@@ -1,7 +1,7 @@
 import json
 import sqlite3
 
-from . import _now, get_db
+from . import _now, get_db, normalize_subreddit
 
 
 def upsert_post(post_data):
@@ -22,6 +22,12 @@ def upsert_post(post_data):
     if permalink and not permalink.startswith("http"):
         permalink = f"https://reddit.com{permalink}"
 
+    # Canonicalise subreddit on every write so all downstream
+    # `WHERE posts.subreddit = ?` lookups (which compare against the
+    # caller-supplied query name run through the same normaliser) match
+    # regardless of what casing the scraper / fixture / pipeline passed in.
+    subreddit = normalize_subreddit(post_data.get("subreddit", ""))
+
     extra_fields = {
         k: v
         for k, v in post_data.items()
@@ -41,7 +47,7 @@ def upsert_post(post_data):
                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 reddit_id,
-                post_data.get("subreddit", ""),
+                subreddit,
                 post_data.get("title", ""),
                 (post_data.get("selftext", "") or "")[:10000],
                 post_data.get("url", ""),

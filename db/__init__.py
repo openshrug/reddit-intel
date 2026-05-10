@@ -75,6 +75,17 @@ def in_clause_placeholders(n):
     return ",".join("?" * n)
 
 
+def normalize_subreddit(value):
+    """Canonical form used everywhere subreddit names are stored or queried.
+    Reddit treats subreddit names as case-insensitive at the URL/API level,
+    so we lowercase here to make `WHERE posts.subreddit = ?` agree with the
+    Reddit-side identity. Also strips a leading `r/` or `/r/` and any
+    surrounding slashes so callers can pass `r/SaaS`, `/r/saas/`, or
+    `SaaS` interchangeably.
+    """
+    return (value or "").strip().removeprefix("r/").removeprefix("/r/").strip("/").lower()
+
+
 def get_db():
     conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row

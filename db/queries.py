@@ -4,7 +4,7 @@ Every function here returns plain dicts (never sqlite3.Row) and never
 mutates the database.
 """
 
-from . import get_db
+from . import get_db, normalize_subreddit
 
 
 def get_top_painpoints(limit=20):
@@ -75,6 +75,7 @@ def get_painpoints_by_category(category_name, limit=20):
 
 def get_painpoints_by_subreddit(subreddit, limit=20):
     """Merged painpoints that have evidence from a specific subreddit."""
+    subreddit = normalize_subreddit(subreddit)
     conn = get_db()
     rows = conn.execute("""
         SELECT p.*, c.name AS category,
@@ -96,6 +97,7 @@ def get_painpoints_by_subreddit(subreddit, limit=20):
 def get_subreddit_summary(subreddit):
     """High-level stats for a subreddit: post count, comment count,
     painpoint count, top categories."""
+    subreddit = normalize_subreddit(subreddit)
     conn = get_db()
 
     counts = conn.execute("""

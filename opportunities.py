@@ -12,6 +12,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from db import normalize_subreddit
 from db.opportunity_queries import get_opportunity_evidence_rows
 
 BRIEF_EVIDENCE_LIMIT = 30
@@ -78,7 +79,7 @@ def get_opportunity_evidence(subreddit, *, limit=BRIEF_EVIDENCE_LIMIT, category=
     candidate painpoint to have at least one source with a non-empty quote,
     so the caller asking for N packs gets up to N packs back (capped by the
     actual number of quoted painpoints in the subreddit)."""
-    subreddit = _normalize_subreddit(subreddit)
+    subreddit = normalize_subreddit(subreddit)
     rows = get_opportunity_evidence_rows(
         subreddit, limit=_clamp_limit(limit), category=category,
     )
@@ -135,7 +136,3 @@ def _quote(item):
 
 def _clamp_limit(limit):
     return max(1, min(int(limit), 50))
-
-
-def _normalize_subreddit(value):
-    return (value or "").strip().removeprefix("r/").removeprefix("/r/").strip("/")

@@ -174,7 +174,7 @@ async def bench(*, subreddit=None, configs=None, judge_sample=20, output_dir=Non
     params = None
     if subreddit:
         query += " WHERE subreddit = ?"
-        params = (subreddit,)
+        params = (db.normalize_subreddit(subreddit),)
     rows = run_sql(query, params)
     post_ids = [r["id"] for r in rows]
 

@@ -24,14 +24,16 @@ def test_query_utility_groups_local_and_cross_subreddit_evidence(opportunity_db)
     assert rows[0]["title"] == "Manual follow-up loses small-business leads"
     assert rows[0]["local_signal_count"] == 2
     assert rows[0]["global_signal_count"] == 3
-    assert rows[0]["subreddits_seen"] == ["Entrepreneur", "smallbusiness"]
+    # `posts.subreddit` is canonicalised on write by `db.normalize_subreddit`,
+    # so the seed fixture's "Entrepreneur" round-trips as "entrepreneur".
+    assert rows[0]["subreddits_seen"] == ["entrepreneur", "smallbusiness"]
 
     local = rows[0]["local_evidence"]
     cross = rows[0]["cross_subreddit_evidence"]
     assert len(local) == 2
     assert len(cross) == 1
     assert {item["subreddit"] for item in local} == {"smallbusiness"}
-    assert {item["subreddit"] for item in cross} == {"Entrepreneur"}
+    assert {item["subreddit"] for item in cross} == {"entrepreneur"}
     assert all(item["source_permalink"].startswith("https://reddit.com/") for item in local + cross)
 
 

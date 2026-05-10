@@ -61,7 +61,8 @@ def list_pending_painpoints_for_subreddit(subreddit, *, since_pp_id=None,
     ``subreddit``, joined with post + comment context.
 
     Args:
-        subreddit: subreddit name (case-sensitive, matches ``posts.subreddit``).
+        subreddit: subreddit name; normalised via ``db.normalize_subreddit``
+            so callers can pass ``r/SaaS`` / ``saas`` / ``SaaS`` interchangeably.
         since_pp_id: if set, only return pendings with ``id > since_pp_id``
             (used for cross-snapshot "what was added in this stage" diffs).
         limit: optional row cap for sampling.
@@ -76,7 +77,7 @@ def list_pending_painpoints_for_subreddit(subreddit, *, since_pp_id=None,
     conn = db.get_db()
     try:
         clauses = ["p.subreddit = ?"]
-        params = [subreddit]
+        params = [db.normalize_subreddit(subreddit)]
         if since_pp_id is not None:
             clauses.append("pp.id > ?")
             params.append(since_pp_id)

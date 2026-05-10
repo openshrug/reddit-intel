@@ -5,7 +5,7 @@ painpoints are local to a subreddit, which evidence comes from adjacent
 communities, and which permalink should be used for a quoted source.
 """
 
-from . import get_db
+from . import get_db, normalize_subreddit
 
 
 def get_opportunity_evidence_rows(subreddit, *, limit=10, category=None):
@@ -14,7 +14,7 @@ def get_opportunity_evidence_rows(subreddit, *, limit=10, category=None):
     The returned rows are plain dicts so callers outside MCP can reuse the
     same evidence semantics in tests, docs, or future export surfaces.
     """
-    subreddit = _normalize_subreddit(subreddit)
+    subreddit = normalize_subreddit(subreddit)
     if not subreddit:
         return []
 
@@ -177,7 +177,7 @@ def _split_evidence(evidence, requested_subreddit):
     local = []
     cross = []
     for item in evidence:
-        if _normalize_subreddit(item.get("subreddit")) == requested_subreddit:
+        if normalize_subreddit(item.get("subreddit")) == requested_subreddit:
             local.append(item)
         else:
             cross.append(item)
@@ -187,10 +187,6 @@ def _split_evidence(evidence, requested_subreddit):
 def _source_permalink(row):
     permalink = row.get("comment_permalink") or row.get("post_permalink") or ""
     return _normalize_permalink(permalink)
-
-
-def _normalize_subreddit(value):
-    return (value or "").strip().removeprefix("r/").removeprefix("/r/").strip("/")
 
 
 def _normalize_permalink(value):
