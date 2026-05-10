@@ -49,10 +49,9 @@ mcp = FastMCP(
         "Opportunity briefs: route 'brief me on r/<sub>', 'generate a brief on "
         "<sub>', or 'opportunity brief on <sub>' to the opportunity_brief "
         "prompt — it pulls workflow from "
-        "reddit-intel://opportunity-brief-instructions, synthesis fields from "
-        "reddit-intel://opportunity-brief-template, and rendering from "
-        "reddit-intel://opportunity-brief-layout, then calls "
-        "get_opportunity_evidence under the hood.\n"
+        "reddit-intel://opportunity-brief-instructions and the synthesis + "
+        "rendering spec from reddit-intel://opportunity-brief-spec, then "
+        "calls get_opportunity_evidence under the hood.\n"
         "Escape hatch: run_sql for ad-hoc SELECTs — read reddit-intel://schema first."
     ),
 )
@@ -150,7 +149,7 @@ def get_opportunity_evidence(
     Pure data — no synthesis guidance is returned. For the brief workflow and
     synthesis structure, use the opportunity_brief prompt and the
     reddit-intel://opportunity-brief-instructions +
-    reddit-intel://opportunity-brief-template resources."""
+    reddit-intel://opportunity-brief-spec resources."""
     return opportunities.get_opportunity_evidence(
         subreddit, limit=limit, category=category,
     )
@@ -283,23 +282,13 @@ def opportunity_brief_instructions() -> str:
     ).read_text()
 
 
-@mcp.resource("reddit-intel://opportunity-brief-template")
-def opportunity_brief_template() -> str:
-    """Customizable opportunity brief synthesis template (Markdown). Source of
-    truth for the per-opportunity output structure used by the
-    opportunity_brief prompt."""
+@mcp.resource("reddit-intel://opportunity-brief-spec")
+def opportunity_brief_spec() -> str:
+    """Customizable opportunity brief synthesis + rendering spec (Markdown).
+    Source of truth for the conviction-tier rubric, per-card field list, and
+    document skeleton used by the opportunity_brief prompt."""
     return (
-        Path(__file__).parent / "opportunity_briefs" / "SYNTHESIS_TEMPLATE.md"
-    ).read_text()
-
-
-@mcp.resource("reddit-intel://opportunity-brief-layout")
-def opportunity_brief_layout() -> str:
-    """Customizable opportunity brief layout (Markdown). Source of truth for
-    the document skeleton and per-opportunity card rendering used by the
-    opportunity_brief prompt."""
-    return (
-        Path(__file__).parent / "opportunity_briefs" / "BRIEF_LAYOUT.md"
+        Path(__file__).parent / "opportunity_briefs" / "BRIEF_SPEC.md"
     ).read_text()
 
 
@@ -328,17 +317,16 @@ def opportunity_brief(subreddit: str) -> str:
         "1. Fetch reddit-intel://opportunity-brief-instructions and follow it "
         "for tool-use flow (stats check, scrape permission, persistence "
         "prompt).\n"
-        "2. Fetch reddit-intel://opportunity-brief-template and follow it for "
-        "the conviction-tier classification and the per-opportunity field "
-        "list.\n"
-        "3. Fetch reddit-intel://opportunity-brief-layout and follow it for "
-        "the document skeleton and per-opportunity card rendering.\n"
-        f"4. Call get_opportunity_evidence(subreddit='{subreddit}', "
+        "2. Fetch reddit-intel://opportunity-brief-spec and follow it for "
+        "the conviction-tier classification, the per-card field spec, and "
+        "the document skeleton.\n"
+        f"3. Call get_opportunity_evidence(subreddit='{subreddit}', "
         f"limit={opportunities.BRIEF_EVIDENCE_LIMIT}) as the evidence API.\n"
         "\n"
-        "Do not restate the rules from the instructions resource, the field "
-        "list from the template resource, or the layout from the layout "
-        "resource — fetch them and follow them."
+        "Share concise and useful progress updates to the user, when it makes sense. "
+        "Mention specific numbers when it makes sense to do so. "
+        "Do not restate the rules from the instructions resource or the "
+        "spec from the spec resource — fetch them and follow them."
     )
 
 

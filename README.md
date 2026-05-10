@@ -150,14 +150,13 @@ Add to `~/.config/openclaw/openclaw.json5`:
 | `reddit-intel://stats`                           | DB stats snapshot                                                          |
 | `reddit-intel://taxonomy`                        | Category taxonomy                                                          |
 | `reddit-intel://opportunity-brief-instructions`  | Workflow + evidence rules for opportunity briefs (Markdown, customizable)  |
-| `reddit-intel://opportunity-brief-template`      | Synthesis fields + conviction-tier rubric for opportunity briefs (Markdown, customizable) |
-| `reddit-intel://opportunity-brief-layout`        | Document skeleton and card markdown for opportunity briefs (Markdown, customizable) |
+| `reddit-intel://opportunity-brief-spec`          | Synthesis + rendering spec for opportunity briefs: conviction-tier rubric, per-card field list, document skeleton (Markdown, customizable) |
 
 ### Available prompts
 
 | Prompt              | Description                                                                                                                          |
 | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `opportunity_brief` | Thin launcher that points the agent at the three brief resources (instructions, template, layout) and `get_opportunity_evidence`. Takes only `subreddit`; the agent surfaces opportunities by conviction tier from the evidence rather than asking for a target count. |
+| `opportunity_brief` | Thin launcher that points the agent at the two brief resources (instructions, spec) and `get_opportunity_evidence`. Takes only `subreddit`; the agent surfaces opportunities by conviction tier from the evidence rather than asking for a target count. |
 
 ### Opportunity discovery prompt
 
@@ -169,22 +168,20 @@ Brief me on r/smallbusiness.
 
 In MCP clients that surface prompts, this routes to the `opportunity_brief`
 prompt. The prompt is a thin launcher: it tells the agent to fetch
-`reddit-intel://opportunity-brief-instructions` (workflow + evidence rules),
-`reddit-intel://opportunity-brief-template` (synthesis fields +
-conviction-tier rubric), and `reddit-intel://opportunity-brief-layout`
-(document skeleton and card markdown), then
+`reddit-intel://opportunity-brief-instructions` (workflow + evidence rules)
+and `reddit-intel://opportunity-brief-spec` (conviction-tier rubric,
+per-card field spec, document skeleton), then
 call `get_opportunity_evidence(subreddit, limit=30)` for evidence (the value
 comes from `opportunities.BRIEF_EVIDENCE_LIMIT`). The agent
 classifies each evidence pack into highest / strong / exploratory conviction
 and surfaces the highest + strong tiers in the initial brief; exploratory
 candidates are held back unless you ask for more breadth. All workflow,
-synthesis, and layout rules live in the three Markdown files; edit them to
+synthesis, and rendering rules live in the two Markdown files; edit them to
 change agent behavior without touching Python.
 
 For the source files, see
-[`opportunity_briefs/AGENTS.md`](opportunity_briefs/AGENTS.md),
-[`opportunity_briefs/SYNTHESIS_TEMPLATE.md`](opportunity_briefs/SYNTHESIS_TEMPLATE.md),
-and [`opportunity_briefs/BRIEF_LAYOUT.md`](opportunity_briefs/BRIEF_LAYOUT.md).
+[`opportunity_briefs/AGENTS.md`](opportunity_briefs/AGENTS.md) and
+[`opportunity_briefs/BRIEF_SPEC.md`](opportunity_briefs/BRIEF_SPEC.md).
 
 ## Credentials
 

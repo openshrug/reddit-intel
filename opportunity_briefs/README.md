@@ -5,13 +5,12 @@ opportunity-discovery flow, plus optional saved research artifacts.
 
 `reddit-intel` supplies evidence packs (via `get_opportunity_evidence`); your
 agent turns those packs into product opportunity briefs by following the
-workflow in `AGENTS.md`, the synthesis structure in `SYNTHESIS_TEMPLATE.md`,
-and the rendering rules in `BRIEF_LAYOUT.md`. All three files are exposed
-via MCP so any MCP-aware client can fetch the current versions:
+workflow in `AGENTS.md` and the synthesis + rendering spec in
+`BRIEF_SPEC.md`. Both files are exposed via MCP so any MCP-aware client can
+fetch the current versions:
 
 - `reddit-intel://opportunity-brief-instructions` -> `AGENTS.md`
-- `reddit-intel://opportunity-brief-template` -> `SYNTHESIS_TEMPLATE.md`
-- `reddit-intel://opportunity-brief-layout` -> `BRIEF_LAYOUT.md`
+- `reddit-intel://opportunity-brief-spec` -> `BRIEF_SPEC.md`
 
 ## First Demo Flow
 
@@ -29,29 +28,25 @@ target number. The prompt is a thin launcher that:
 1. Tells the agent to fetch `reddit-intel://opportunity-brief-instructions`
    and follow it for tool-use flow (stats check, scrape permission,
    persistence prompt).
-2. Tells the agent to fetch `reddit-intel://opportunity-brief-template` and
-   follow it for conviction-tier classification and the per-opportunity
-   field list.
-3. Tells the agent to fetch `reddit-intel://opportunity-brief-layout` and
-   follow it for the document skeleton and per-opportunity card rendering.
-4. Tells the agent to call `get_opportunity_evidence(subreddit, limit=30)` (the value comes from `opportunities.BRIEF_EVIDENCE_LIMIT`)
+2. Tells the agent to fetch `reddit-intel://opportunity-brief-spec` and
+   follow it for conviction-tier classification, the per-card field spec,
+   and the document skeleton.
+3. Tells the agent to call `get_opportunity_evidence(subreddit, limit=30)` (the value comes from `opportunities.BRIEF_EVIDENCE_LIMIT`)
    for the evidence.
 
 The agent classifies each evidence pack into highest / strong / exploratory
-conviction (criteria in `SYNTHESIS_TEMPLATE.md`) and surfaces highest +
-strong in the initial brief; exploratory items are held back unless you ask
-for more breadth. All workflow, synthesis, and layout rules live in the
-three Markdown files; edit them to change agent behavior without touching
-Python.
+conviction (criteria in `BRIEF_SPEC.md`) and surfaces highest + strong in
+the initial brief; exploratory items are held back unless you ask for more
+breadth. All workflow, synthesis, and rendering rules live in the two
+Markdown files; edit them to change agent behavior without touching Python.
 
 ## Folder Layout
 
 ```text
 opportunity_briefs/
   AGENTS.md
-  BRIEF_LAYOUT.md
+  BRIEF_SPEC.md
   README.md
-  SYNTHESIS_TEMPLATE.md
   runs/
     <local generated runs, gitignored>
 ```

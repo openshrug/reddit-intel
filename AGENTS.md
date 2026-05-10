@@ -19,7 +19,7 @@ MCP server exposes the database to other AI agents.
   4-stage pipeline: scrape → persist → extract → promote. Always start
   reading here if you want to understand control flow.
 - [`mcp_server.py`](mcp_server.py) — MCP entrypoint
-  (`reddit-intel-mcp`). Exposes 11 tools and 3 resources backed by
+  (`reddit-intel-mcp`). Exposes 11 tools and 5 resources backed by
   the same DB.
 - [`reddit_scraper.py`](reddit_scraper.py) — Reddit OAuth + listing
   fetch + comment tree expansion.

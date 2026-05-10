@@ -3,16 +3,14 @@
 Use these instructions when turning `get_opportunity_evidence` output into
 product opportunity briefs.
 
-`SYNTHESIS_TEMPLATE.md` is the canonical synthesis prompt (fields and
-conviction-tier rubric). `BRIEF_LAYOUT.md` is the canonical layout /
-rendering guide (document skeleton and per-opportunity card markdown).
-For run-specific behavior, edit or copy those files. All three files are
-exposed via MCP so any MCP-aware agent can fetch the current versions
-without going through the repo filesystem:
+`BRIEF_SPEC.md` is the canonical synthesis + rendering spec (conviction-tier
+rubric, per-card field list, and document skeleton). For run-specific
+behavior, edit or copy that file. Both files are exposed via MCP so any
+MCP-aware agent can fetch the current versions without going through the
+repo filesystem:
 
 - `reddit-intel://opportunity-brief-instructions` serves this file.
-- `reddit-intel://opportunity-brief-template` serves `SYNTHESIS_TEMPLATE.md`.
-- `reddit-intel://opportunity-brief-layout` serves `BRIEF_LAYOUT.md`.
+- `reddit-intel://opportunity-brief-spec` serves `BRIEF_SPEC.md`.
 
 ## Flow
 
@@ -24,16 +22,16 @@ without going through the repo filesystem:
 4. If data is missing, ask before calling `scrape_subreddit`; scraping is slow
   and uses Reddit/OpenAI quota.
 5. Call `get_opportunity_evidence(subreddit, limit=30)` (the value comes from `opportunities.BRIEF_EVIDENCE_LIMIT` — update there to re-tune).
-6. Classify each pack into a conviction tier per `SYNTHESIS_TEMPLATE.md`
-  (fields and rubric) and render the brief per `BRIEF_LAYOUT.md` (document
-  skeleton and card markdown); build the shortlist from highest + strong
-  conviction tiers and hold exploratory candidates back unless the user
-  asks for more breadth.
+6. Classify each pack into a conviction tier per `BRIEF_SPEC.md` and render
+  the brief per the same file (conviction-tier rubric, per-card spec, and
+  document skeleton); build the shortlist from highest + strong conviction
+  tiers and hold exploratory candidates back unless the user asks for more
+  breadth.
 7. After presenting the brief, ask whether the user wants to persist it under
   `opportunity_briefs/runs/`.
-8. If the user says yes, persist the exact `SYNTHESIS_TEMPLATE.md` and
-  `BRIEF_LAYOUT.md` used alongside `evidence.json`, `assumptions.md`, and
-  `brief.md` so both the synthesis and the rendering are reproducible later.
+8. If the user says yes, persist the exact `BRIEF_SPEC.md` used alongside
+  `evidence.json`, `assumptions.md`, and `brief.md` so both the synthesis and
+  the rendering are reproducible later.
 9. If the user asks for more breadth, surface the held-back exploratory
   candidates using the same per-opportunity structure.
 
