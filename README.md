@@ -21,11 +21,18 @@ the included demo UI, or expose to any AI agent through the bundled MCP
 server. The painpoint table is raw material founders feed into product
 ideation, content research, and competitive analysis.
 
+### Opportunity Brief
+
 The first agent-native workflow is **opportunity discovery**: ask your
 agent for product opportunities in a subreddit, and reddit-intel returns
 ranked evidence packs with local quotes, cross-subreddit support, and
 clickable Reddit source links. Your agent synthesizes the brief; the
 database remains the evidence layer.
+
+<p align="center">
+  <img src="docs/assets/opportunity-brief.gif" alt="Ask your agent for an opportunity brief with reddit-intel" width="900">
+</p>
+
 
 ## Why
 
